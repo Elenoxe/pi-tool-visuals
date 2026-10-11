@@ -32,6 +32,7 @@ const codemode = toolVisualsConfigSchema.properties.codemode.properties
 // A layer contains optional overrides at every level, without inserting defaults.
 const configLayerSchema = partialObject({
   ...toolVisualsConfigSchema.properties,
+  highlight: partialObject(toolVisualsConfigSchema.properties.highlight.properties),
   codemode: partialObject({
     script: partialObject(codemode.script.properties),
     calls: partialObject(codemode.calls.properties),
@@ -44,6 +45,7 @@ export function createDefaultConfig(): ToolVisualsConfig {
   return {
     enabled: true,
     collapsedLines: 8,
+    highlight: { enable: true, theme: "auto" },
     codemode: {
       script: { showCollapsed: false, collapsedLines: 12 },
       calls: { collapsedCount: 8 },
@@ -71,6 +73,8 @@ export function parseToolVisualsConfig(
 
   config.enabled = value.enabled ?? config.enabled
   config.collapsedLines = value.collapsedLines ?? config.collapsedLines
+  config.highlight.enable = value.highlight?.enable ?? config.highlight.enable
+  config.highlight.theme = value.highlight?.theme ?? config.highlight.theme
   const overrides = value.codemode
   config.codemode.script.showCollapsed =
     overrides?.script?.showCollapsed ?? config.codemode.script.showCollapsed

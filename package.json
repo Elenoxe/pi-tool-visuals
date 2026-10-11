@@ -70,5 +70,8 @@
   "trustedDependencies": [
     "@google/genai",
     "protobufjs"
-  ]
+  ],
+  "dependencies": {
+    "shiki": "4.4.3"
+  }
 }

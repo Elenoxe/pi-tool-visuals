@@ -132,6 +132,52 @@ describe("configuration files", () => {
     })
   })
 
+  test("preserves highlight themes for enable-only overrides and replaces theme pairs as a unit", () => {
+    const options = { cwd, projectTrusted: true }
+    expect(loadToolVisualsConfig(options).config.highlight).toEqual({
+      enable: true,
+      theme: "auto",
+    })
+
+    const theme = { light: "github-light", dark: "catppuccin-mocha" }
+    writeFileSync(globalPath, JSON.stringify({ highlight: { theme } }))
+    writeFileSync(projectPath, JSON.stringify({ highlight: { enable: false } }))
+    expect(loadToolVisualsConfig(options).config.highlight).toEqual({ enable: false, theme })
+
+    const replacement = { light: "min-light", dark: "tokyo-night" }
+    for (const selected of [replacement, "tokyo-night", "auto"]) {
+      writeFileSync(projectPath, JSON.stringify({ highlight: { theme: selected } }))
+      const loaded = loadToolVisualsConfig(options)
+      expect(loaded.diagnostics).toEqual([])
+      expect(loaded.config.highlight).toEqual({ enable: true, theme: selected })
+    }
+  })
+
+  test("rejects invalid highlight layers with diagnostics and retains the valid global layer", () => {
+    const highlight = { enable: true, theme: "tokyo-night" }
+    writeFileSync(globalPath, JSON.stringify({ highlight, collapsedLines: 12 }))
+    for (const theme of [
+      "not-a-shiki-theme",
+      { light: "github-light" },
+      { dark: "dark-plus" },
+      { light: "github-light", dark: "not-a-shiki-theme" },
+    ]) {
+      writeFileSync(
+        projectPath,
+        JSON.stringify({ highlight: { enable: false, theme }, collapsedLines: 3 }),
+      )
+      const loaded = loadToolVisualsConfig({ cwd, projectTrusted: true })
+      expect(loaded.config.highlight).toEqual(highlight)
+      expect(loaded.config.collapsedLines).toBe(12)
+      expect(loaded.diagnostics.length).toBeGreaterThan(0)
+      expect(
+        loaded.diagnostics.every(
+          ({ message }) => message.includes(projectPath) && message.includes("/highlight/theme"),
+        ),
+      ).toBe(true)
+    }
+  })
+
   test("skips bad layers independently and distinguishes absent, unreadable, and invalid files", () => {
     const options = { cwd, projectTrusted: true }
     const absent = loadToolVisualsConfig(options)

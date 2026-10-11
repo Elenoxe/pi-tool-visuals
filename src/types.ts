@@ -1,7 +1,16 @@
+import { bundledThemesInfo } from "shiki/themes"
 import Type, { type Static } from "typebox"
 
 const positiveInteger = Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })
 const closed = { additionalProperties: false }
+
+const shikiTheme = Type.String({ enum: bundledThemesInfo.map(({ id }) => id) })
+const highlightTheme = Type.Union([
+  Type.Literal("auto"),
+  shikiTheme,
+  Type.Object({ light: shikiTheme, dark: shikiTheme }, closed),
+])
+const highlightConfigSchema = Type.Object({ enable: Type.Boolean(), theme: highlightTheme }, closed)
 
 const resolvedToolConfigSchema = Type.Object(
   { enabled: Type.Boolean(), collapsedLines: positiveInteger },
@@ -13,6 +22,7 @@ export const toolVisualsConfigSchema = Type.Object(
   {
     enabled: Type.Boolean(),
     collapsedLines: positiveInteger,
+    highlight: highlightConfigSchema,
     codemode: Type.Object(
       {
         script: Type.Object(
