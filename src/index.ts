@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ToolRenderers } from "@earendil-works/pi-coding-agent"
 
 import { createDefaultConfig, loadToolVisualsConfig } from "./config.ts"
-import { configureHighlighting, disposeHighlighting } from "./highlight.ts"
+import { configureHighlighting, disposeHighlighting } from "./highlight/index.ts"
 import { createToolRendererResolver } from "./resolver.ts"
 
 export default function toolVisuals(pi: ExtensionAPI): void {

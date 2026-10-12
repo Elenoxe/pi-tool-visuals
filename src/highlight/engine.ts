@@ -6,11 +6,14 @@ import {
   type BundledLanguage,
   type BundledTheme,
   type Highlighter,
+  type GrammarState,
+  type ThemedToken,
 } from "shiki"
 import { bundledLanguagesInfo } from "shiki/langs"
 import { bundledThemes } from "shiki/themes"
 
-import type { ToolVisualsConfig } from "./types.ts"
+import { BoundedLru, HIGHLIGHT_LIMITS } from "./cache.ts"
+import type { ToolVisualsConfig } from "../types.ts"
 
 export interface HighlightOptions {
   theme: Theme
@@ -28,7 +31,7 @@ for (const { id, aliases = [] } of bundledLanguagesInfo) {
   }
 }
 
-function canonicalLanguage(name: string): BundledLanguage | undefined {
+export function canonicalLanguage(name: string): BundledLanguage | undefined {
   return languageIds.get(name.trim().toLowerCase())
 }
 
@@ -123,9 +126,12 @@ type HighlightConfig = ToolVisualsConfig["highlight"]
 
 let settings: HighlightConfig = { enable: true, theme: "auto" }
 
-export function configureHighlighting(config: HighlightConfig): void {
-  settings = config
-  if (!config.enable) disposeHighlighting()
+export function configureEngine(config: HighlightConfig): void {
+  settings = {
+    enable: config.enable,
+    theme: typeof config.theme === "string" ? config.theme : { ...config.theme },
+  }
+  if (!config.enable) disposeEngine()
 }
 
 const DEFAULT_THEMES = { light: "github-light", dark: "dark-plus" } as const
@@ -143,25 +149,27 @@ type Listeners = Map<() => void, ErrorHandler>
 interface HighlightingState {
   highlighter?: Highlighter
   ready?: Promise<void>
-  initializationFailed: boolean
+  initializationError?: Error
   pending: Map<BundledLanguage, Listeners>
-  failedLanguages: Set<BundledLanguage>
+  failedLanguages: Map<BundledLanguage, Error>
   pendingThemes: Map<BundledTheme, Listeners>
-  failedThemes: Set<BundledTheme>
+  failedThemes: Map<BundledTheme, Error>
 }
 
 let state: HighlightingState | undefined
-const colorCache = new Map<string, Color>()
+const colorCache = new BoundedLru<Color>(
+  HIGHLIGHT_LIMITS.colorEntries,
+  HIGHLIGHT_LIMITS.colorCharacters,
+)
 
 function getState(onError: ErrorHandler): HighlightingState {
   if (state) return state
 
   const current: HighlightingState = {
-    initializationFailed: false,
     pending: new Map(),
-    failedLanguages: new Set(),
+    failedLanguages: new Map(),
     pendingThemes: new Map(),
-    failedThemes: new Set(),
+    failedThemes: new Map(),
   }
   state = current
   current.ready = createHighlighter({
@@ -174,8 +182,13 @@ function getState(onError: ErrorHandler): HighlightingState {
     })
     .catch((cause: unknown) => {
       if (state === current) {
-        current.initializationFailed = true
-        onError(new Error(`Shiki initialization failed: ${String(cause)}`, { cause }))
+        const handlers = new Set([onError])
+        for (const listeners of [...current.pending.values(), ...current.pendingThemes.values()]) {
+          for (const handler of listeners.values()) handlers.add(handler)
+        }
+        const error = new Error(`Shiki initialization failed: ${String(cause)}`, { cause })
+        current.initializationError = error
+        for (const handler of handlers) handler(error)
       }
     })
   return current
@@ -214,10 +227,11 @@ function requestLanguage(
       }
     } catch (cause) {
       if (state === current) {
-        current.failedLanguages.add(language)
-        onError(
-          new Error(`Shiki language loading failed (${language}): ${String(cause)}`, { cause }),
-        )
+        const error = new Error(`Shiki language loading failed (${language}): ${String(cause)}`, {
+          cause,
+        })
+        current.failedLanguages.set(language, error)
+        for (const handler of new Set([onError, ...listeners.values()])) handler(error)
       }
     } finally {
       if (state === current) current.pending.delete(language)
@@ -259,8 +273,11 @@ function requestTheme(
       }
     } catch (cause) {
       if (state === current) {
-        current.failedThemes.add(themeId)
-        onError(new Error(`Shiki theme loading failed (${themeId}): ${String(cause)}`, { cause }))
+        const error = new Error(`Shiki theme loading failed (${themeId}): ${String(cause)}`, {
+          cause,
+        })
+        current.failedThemes.set(themeId, error)
+        for (const handler of new Set([onError, ...listeners.values()])) handler(error)
       }
     } finally {
       if (state === current) current.pendingThemes.delete(themeId)
@@ -277,12 +294,12 @@ function tokenColor(color: string): Color | undefined {
   let parsed = colorCache.get(hex)
   if (!parsed) {
     parsed = parseColor(hex)
-    colorCache.set(hex, parsed)
+    colorCache.set(hex, parsed, hex.length)
   }
   return parsed
 }
 
-function safeSource(code: string): string {
+export function safeSource(code: string): string {
   return code.replace(/\r\n?/g, "\n").replace(/\p{Cc}/gu, (char) => {
     if (char === "\t" || char === "\n") return char
     const point = char.charCodeAt(0)
@@ -290,24 +307,40 @@ function safeSource(code: string): string {
   })
 }
 
-/**
- * Return ANSI-styled lines synchronously, or null until the language is ready.
- * The caller should render plain source lines while waiting.
- */
-export function highlightCode(
-  code: string,
-  language: string | undefined,
-  { theme, invalidate, onError }: HighlightOptions,
-): string[] | null {
-  if (!settings.enable) return null
+export interface HighlightIdentity {
+  language: BundledLanguage
+  themeId: BundledTheme
+  colorMode: ReturnType<Theme["getColorMode"]>
+  key: string
+}
 
+export function resolveIdentity(
+  language: string | undefined,
+  theme: Theme,
+): HighlightIdentity | null {
+  if (!settings.enable) return null
   const id = language ? canonicalLanguage(language) : undefined
   if (!id) return null
-
   const themeId = resolveHighlightTheme(theme.appearance)
+  const colorMode = theme.getColorMode()
+  return { language: id, themeId, colorMode, key: JSON.stringify([id, themeId, colorMode]) }
+}
+
+export function engineFailure(identity: HighlightIdentity): Error | undefined {
+  return (
+    state?.initializationError ??
+    state?.failedLanguages.get(identity.language) ??
+    state?.failedThemes.get(identity.themeId)
+  )
+}
+
+export function readyEngine(
+  { language: id, themeId }: HighlightIdentity,
+  { invalidate, onError }: Omit<HighlightOptions, "theme">,
+): Highlighter | null {
   const current = getState(onError)
   if (
-    current.initializationFailed ||
+    current.initializationError ||
     current.failedLanguages.has(id) ||
     current.failedThemes.has(themeId)
   ) {
@@ -321,35 +354,69 @@ export function highlightCode(
   if (!themeReady) requestTheme(current, themeId, invalidate, onError)
   if (!highlighter || !languageReady || !themeReady) return null
 
-  try {
-    const result = highlighter.codeToTokens(safeSource(code), {
-      lang: id,
-      theme: themeId,
-    })
+  return highlighter
+}
 
-    return result.tokens.map((line) =>
-      line
-        .map((token) => {
-          const style = getTokenStyleObject(token)
-          const fg = tokenColor(token.color ?? result.fg ?? "")
-          return theme.style(token.content, {
-            fg,
-            bold: style["font-weight"] === "bold",
-            italic: style["font-style"] === "italic",
-            underline: style["text-decoration"]?.includes("underline"),
-            strikethrough: style["text-decoration"]?.includes("line-through"),
-          })
+export function detachEngineListener(callback: () => void): void {
+  for (const listeners of state?.pending.values() ?? []) listeners.delete(callback)
+  for (const listeners of state?.pendingThemes.values() ?? []) listeners.delete(callback)
+}
+
+export function ansiLines(tokens: ThemedToken[][], theme: Theme, foreground = ""): string[] {
+  return tokens.map((line) =>
+    line
+      .map((token) => {
+        const style = getTokenStyleObject(token)
+        const fg = tokenColor(token.color ?? foreground)
+        return theme.style(token.content, {
+          fg,
+          bold: style["font-weight"] === "bold",
+          italic: style["font-style"] === "italic",
+          underline: style["text-decoration"]?.includes("underline"),
+          strikethrough: style["text-decoration"]?.includes("line-through"),
         })
-        .join(""),
-    )
-  } catch (cause) {
-    onError(new Error(`Shiki highlighting failed (${id}): ${String(cause)}`, { cause }))
-    return null
+      })
+      .join(""),
+  )
+}
+
+export function tokenizeCode(
+  highlighter: Highlighter,
+  code: string,
+  identity: HighlightIdentity,
+  theme: Theme,
+): string[] {
+  const result = highlighter.codeToTokens(safeSource(code), {
+    lang: identity.language,
+    theme: identity.themeId,
+    tokenizeMaxLineLength: HIGHLIGHT_LIMITS.maxLineLength,
+  })
+  return ansiLines(result.tokens, theme, result.fg)
+}
+
+export function tokenizeSlice(
+  highlighter: Highlighter,
+  code: string,
+  identity: HighlightIdentity,
+  theme: Theme,
+  grammarState?: GrammarState,
+): { lines: string[]; grammarState: GrammarState } {
+  const tokens = highlighter.codeToTokensBase(safeSource(code), {
+    lang: identity.language,
+    theme: identity.themeId,
+    grammarState,
+    tokenizeMaxLineLength: HIGHLIGHT_LIMITS.maxLineLength,
+  })
+  const next = highlighter.getLastGrammarState(tokens)
+  if (!next) throw new Error("Shiki did not return GrammarState")
+  return {
+    lines: ansiLines(tokens, theme, highlighter.getTheme(identity.themeId).fg),
+    grammarState: next,
   }
 }
 
 /** Dispose the singleton and ignore late completions from outstanding loads. */
-export function disposeHighlighting(): void {
+export function disposeEngine(): void {
   const previous = state
   state = undefined
   for (const listeners of previous?.pending.values() ?? []) listeners.clear()
