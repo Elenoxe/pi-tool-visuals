@@ -45,6 +45,7 @@ export function createDefaultConfig(): ToolVisualsConfig {
   return {
     enabled: true,
     collapsedLines: 8,
+    pathIcons: "unicode",
     highlight: { enable: true, theme: "auto" },
     codemode: {
       script: { showCollapsed: false, collapsedLines: 12 },
@@ -73,6 +74,7 @@ export function parseToolVisualsConfig(
 
   config.enabled = value.enabled ?? config.enabled
   config.collapsedLines = value.collapsedLines ?? config.collapsedLines
+  config.pathIcons = value.pathIcons ?? config.pathIcons
   config.highlight.enable = value.highlight?.enable ?? config.highlight.enable
   config.highlight.theme = value.highlight?.theme ?? config.highlight.theme
   const overrides = value.codemode

@@ -137,12 +137,21 @@ describe("continuation notices and tool truncation", () => {
           `\n\n[Showing lines 1-${truncation.outputLines} of ${truncation.totalLines}. Use offset=${nextOffset} to continue.]`,
         { truncation },
       )
+      const notice =
+        kind === "lines" ? "Output truncated (2,000-line limit)" : "Output truncated (50 KB limit)"
       for (const expanded of [false, true]) {
         const output = render(result, expanded)
         expect(output).toContain(
           kind === "lines" ? "1 │ const line1 = true" : "1 │ const first = true",
         )
-        expect(output).toContain("Output truncated by read")
+        if (expanded || truncation.outputLines < config.collapsedLines) {
+          expect(output).toContain(notice)
+        } else {
+          expect(output).not.toContain(notice)
+          expect(output).toContain(
+            `${truncation.outputLines + 1 - config.collapsedLines} lines hidden`,
+          )
+        }
         expect(output).not.toContain("Showing lines")
         expect(output).not.toContain("Use offset=")
       }

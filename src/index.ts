@@ -2,6 +2,9 @@ import type { ExtensionAPI, ToolRenderers } from "@earendil-works/pi-coding-agen
 
 import { createDefaultConfig, loadToolVisualsConfig } from "./config.ts"
 import { configureHighlighting, disposeHighlighting } from "./highlight/index.ts"
+import { createFindRenderer } from "./renderers/find.ts"
+import { createGrepRenderer } from "./renderers/grep.ts"
+import { createLsRenderer } from "./renderers/ls.ts"
 import { createReadRenderer } from "./renderers/read.ts"
 import { createToolRendererResolver } from "./resolver.ts"
 
@@ -9,6 +12,9 @@ export default function toolVisuals(pi: ExtensionAPI): void {
   let config = createDefaultConfig()
   const renderers: Record<string, ToolRenderers> = {
     read: createReadRenderer(() => config),
+    grep: createGrepRenderer(() => config),
+    find: createFindRenderer(() => config),
+    ls: createLsRenderer(() => config),
   }
 
   pi.registerToolRenderer(

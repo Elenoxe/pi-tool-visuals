@@ -1,37 +1,30 @@
-import { homedir } from "node:os"
-import { isAbsolute, relative, resolve, sep } from "node:path"
-import { pathToFileURL } from "node:url"
-
 import type { ReadToolDetails, ToolRenderers } from "@earendil-works/pi-coding-agent"
-import { getCapabilities, getKeybindings, hyperlink, Text } from "@earendil-works/pi-tui"
+import type { Text } from "@earendil-works/pi-tui"
 
 import { resolveToolConfig } from "../config.ts"
-import { safeSource } from "../highlight/engine.ts"
-import {
-  cancelHighlightRequest,
-  highlightDocument,
-  highlightFileDocument,
-  languageFromPath,
-} from "../highlight/index.ts"
+import { languageFromPath } from "../highlight/index.ts"
 import type { ToolVisualsConfig } from "../types.ts"
+import {
+  clearSourceHighlight,
+  hiddenNotice,
+  lineNumberWidth,
+  localPath,
+  prepareSourceHighlight,
+  printable,
+  renderPath,
+  renderToolCall,
+  renderToolError,
+  reuseText,
+  selectPreview,
+  textOutput,
+  truncationNotice,
+  type RenderContext as ReadContext,
+  type SourceHighlightState,
+  type Theme,
+  type ToolResult as ReadResult,
+} from "./shared.ts"
 
 type ReadArgs = { path?: string; file_path?: string; offset?: number | null; limit?: number | null }
-type ReadResult = Parameters<NonNullable<ToolRenderers["renderResult"]>>[0]
-type ReadContext = Parameters<NonNullable<ToolRenderers["renderResult"]>>[3]
-type Theme = Parameters<NonNullable<ToolRenderers["renderResult"]>>[2]
-type VisibleLine = { index: number } | { hidden: number }
-
-interface FileHighlightState {
-  key: string
-  pending: boolean
-  refresh: boolean
-  fallback: boolean
-  lines?: (string | null)[]
-}
-
-interface ReadState {
-  fileHighlight?: FileHighlightState
-}
 
 interface ParsedRead {
   source: string
@@ -52,46 +45,6 @@ function firstLine(args: ReadArgs): number {
     : 1
 }
 
-function localPath(path: string, cwd: string): string {
-  let expanded = path
-  if (path === "~") expanded = homedir()
-  else if (path.startsWith("~/")) expanded = resolve(homedir(), path.slice(2))
-  return resolve(cwd, expanded)
-}
-
-function displayPath(path: string, cwd: string): string {
-  if (!path) return "..."
-  if (!isAbsolute(path)) return path
-  const fromCwd = relative(cwd, path)
-  if (!fromCwd) return "."
-  if (fromCwd !== ".." && !fromCwd.startsWith(`..${sep}`) && !isAbsolute(fromCwd)) return fromCwd
-  const fromHome = relative(homedir(), path)
-  if (!fromHome) return "~"
-  if (fromHome !== ".." && !fromHome.startsWith(`..${sep}`) && !isAbsolute(fromHome))
-    return `~/${fromHome}`
-  return path
-}
-
-function printable(text: string): string {
-  return safeSource(text).replaceAll("\t", "    ")
-}
-
-function singleLine(text: string): string {
-  return printable(text).replaceAll("\n", "␊")
-}
-
-function formatDuration(milliseconds: number): string {
-  if (milliseconds < 1000) return `${Math.round(milliseconds)}ms`
-  if (milliseconds < 60_000) return `${(milliseconds / 1000).toFixed(1)}s`
-  return `${Math.floor(milliseconds / 60_000)}m ${Math.round((milliseconds % 60_000) / 1000)}s`
-}
-
-function reuseText(previous: unknown, value: string): Text {
-  const component = previous instanceof Text ? previous : new Text("", 0, 0)
-  component.setText(value)
-  return component
-}
-
 function renderReadCall(args: ReadArgs, theme: Theme, context: ReadContext): Text {
   const path = readPath(args)
   const start = firstLine(args)
@@ -100,37 +53,21 @@ function renderReadCall(args: ReadArgs, theme: Theme, context: ReadContext): Tex
       ? args.limit
       : undefined
   let range = ""
-  if (args.offset != null || args.limit != null) {
+  if ((args.offset != null && args.offset !== 1) || args.limit != null) {
     range = `:${start}`
     if (limit !== undefined) range += `-${start + limit - 1}`
   }
-  const duration = context.durationMs
-  const metadata = [
-    languageFromPath(path),
-    typeof duration === "number" && Number.isFinite(duration)
-      ? formatDuration(duration)
-      : undefined,
-  ].filter((value): value is string => value !== undefined)
-  const styledPath = theme.fg("accent", singleLine(displayPath(path, context.cwd)))
-  const linkedPath =
-    path && getCapabilities().hyperlinks
-      ? hyperlink(styledPath, pathToFileURL(localPath(path, context.cwd)).href)
-      : styledPath
-  return reuseText(
-    context.lastComponent,
-    `${theme.fg("toolTitle", theme.bold("read"))} ${linkedPath}${range ? theme.fg("warning", range) : ""}${metadata.length ? theme.fg("dim", ` · ${metadata.join(" · ")}`) : ""}`,
+  return renderToolCall(
+    "read",
+    (path ? renderPath(path, context.cwd, theme) : "") + (range ? theme.fg("warning", range) : ""),
+    [languageFromPath(path)],
+    theme,
+    context,
   )
 }
 
-function readTextOutput(result: ReadResult): string {
-  return result.content
-    .filter((part) => part.type === "text")
-    .map((part) => part.text)
-    .join("\n")
-}
-
 function parseReadResult(result: ReadResult, args: ReadArgs): ParsedRead {
-  const output = readTextOutput(result)
+  const output = textOutput(result)
   const image =
     result.content.some((part) => part.type === "image") || /^Read image file\b/.test(output)
   if (image) return { source: "", notice: output, image: true, truncated: false }
@@ -143,7 +80,7 @@ function parseReadResult(result: ReadResult, args: ReadArgs): ParsedRead {
     // This is the exact source fragment returned by native Read, excluding its appended notice.
     return {
       source: output.startsWith(truncation.content) ? truncation.content : output,
-      notice: "Output truncated by read",
+      notice: truncationNotice(truncation),
       image: false,
       truncated: true,
     }
@@ -168,132 +105,18 @@ function parseReadResult(result: ReadResult, args: ReadArgs): ParsedRead {
   return { source: output, image: false, truncated: false }
 }
 
-function selectReadLines(count: number, limit: number, expanded: boolean): VisibleLine[] {
-  if (expanded || count <= limit) return Array.from({ length: count }, (_, index) => ({ index }))
-  return [...Array.from({ length: limit }, (_, index) => ({ index })), { hidden: count - limit }]
-}
-
 function renderReadLines(
   lines: readonly string[],
-  visible: readonly VisibleLine[],
   start: number,
   highlighted: readonly (string | null)[] | undefined,
   theme: Theme,
+  width: number,
 ): string[] {
-  const width = String(start + lines.length - 1).length
-  return visible.map((entry) => {
-    if ("hidden" in entry) {
-      const keys = getKeybindings().getKeys("app.tools.expand").join("/")
-      return theme.fg(
-        "dim",
-        `      --- ${entry.hidden} lines hidden${keys ? ` · ${keys} to expand` : ""} ---`,
-      )
-    }
-    const number = theme.fg("dim", `${String(start + entry.index).padStart(width, " ")} │ `)
-    const code =
-      highlighted?.[entry.index] ?? theme.fg("toolOutput", printable(lines[entry.index] ?? ""))
+  return lines.map((line, index) => {
+    const number = theme.fg("dim", `${String(start + index).padStart(width, " ")} │ `)
+    const code = highlighted?.[index] ?? theme.fg("toolOutput", printable(line))
     return number + (code || " ").replaceAll("\t", "    ")
   })
-}
-
-function clearReadHighlight(context: ReadContext): void {
-  cancelHighlightRequest(`${context.toolCallId}:read:file`)
-  cancelHighlightRequest(`${context.toolCallId}:read:source`)
-  const state = context.state as ReadState
-  state.fileHighlight = undefined
-}
-
-/**
- * File-based highlighting has the correct full-file grammar state. Its result is used only
- * if the on-disk lines exactly match the historical tool output. Otherwise we tokenize
- * the returned source itself; we never replace it with today's file contents.
- */
-function prepareReadHighlight(
-  source: string,
-  lines: readonly string[],
-  args: ReadArgs,
-  theme: Theme,
-  context: ReadContext,
-  config: ToolVisualsConfig,
-): (string | null)[] | undefined {
-  const path = readPath(args)
-  const language = languageFromPath(path)
-  if (!config.highlight.enable || !language) {
-    clearReadHighlight(context)
-    return undefined
-  }
-
-  const state = context.state as ReadState
-  const fileSubscriber = `${context.toolCallId}:read:file`
-  const sourceSubscriber = `${context.toolCallId}:read:source`
-  const file = localPath(path, context.cwd)
-  const from = firstLine(args) - 1
-  const key = JSON.stringify([
-    file,
-    from,
-    lines.length,
-    source,
-    language,
-    theme.appearance,
-    theme.getColorMode(),
-    config.highlight.theme,
-  ])
-  if (state.fileHighlight?.key !== key) {
-    cancelHighlightRequest(fileSubscriber)
-    cancelHighlightRequest(sourceSubscriber)
-    state.fileHighlight = { key, pending: false, refresh: true, fallback: false }
-  }
-  const current = state.fileHighlight!
-  const active = () => state.fileHighlight === current
-
-  if (current.refresh && !current.pending && !current.fallback) {
-    current.refresh = false
-    current.pending = true
-    void highlightFileDocument({
-      path: file,
-      language,
-      displayedLines: lines,
-      from,
-      to: from + lines.length,
-      subscriberId: fileSubscriber,
-      theme,
-      onError: () => {},
-      invalidate: () => {
-        if (!active()) return
-        current.refresh = true
-        context.invalidate()
-      },
-    }).then(
-      (highlighted) => {
-        if (!active()) return
-        current.pending = false
-        current.fallback = highlighted === null
-        current.lines = highlighted ?? undefined
-        context.invalidate()
-      },
-      () => {
-        if (!active()) return
-        current.pending = false
-        current.fallback = true
-        context.invalidate()
-      },
-    )
-  }
-
-  if (!current.fallback) return current.lines
-  return (
-    highlightDocument({
-      id: `${context.toolCallId}:read:source-document`,
-      subscriberId: sourceSubscriber,
-      source,
-      language,
-      from: 0,
-      to: lines.length,
-      theme,
-      invalidate: context.invalidate,
-      onError: () => {},
-    }) ?? undefined
-  )
 }
 
 function renderReadResult(
@@ -304,44 +127,56 @@ function renderReadResult(
   config: ToolVisualsConfig,
 ): Text {
   if (context.isError) {
-    clearReadHighlight(context)
-    const error = printable(readTextOutput(result)) || "Failed"
-    return reuseText(
-      context.lastComponent,
-      `\n${theme.fg("error", expanded ? error : error.split("\n", 1)[0]!)}`,
-    )
+    clearSourceHighlight(context, "read", context.state as SourceHighlightState)
+    return renderToolError(result, expanded, theme, context)
   }
 
   const args = (context.args ?? {}) as ReadArgs
   const parsed = parseReadResult(result, args)
+  // Read splits on LF. Strip only the CR associated with CRLF, preserving other characters.
+  const lines = parsed.source
+    ? parsed.source.split("\n").map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line))
+    : []
+  const source = lines.join("\n")
+  const preview = selectPreview(
+    lines,
+    parsed.notice ? printable(parsed.notice).split("\n") : [],
+    resolveToolConfig(config, "read").collapsedLines,
+    expanded,
+  )
   const output: string[] = []
   if (parsed.image || !parsed.source) {
-    clearReadHighlight(context)
+    clearSourceHighlight(context, "read", context.state as SourceHighlightState)
     if (!parsed.notice) output.push(theme.fg("dim", "Empty file"))
   } else {
-    // Read splits on LF. Strip only the CR associated with CRLF, preserving other characters.
-    const lines = parsed.source
-      .split("\n")
-      .map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line))
-    const source = lines.join("\n")
-    const limit = resolveToolConfig(config, "read").collapsedLines
-    const visible = selectReadLines(lines.length, limit, expanded)
-    const highlighted = prepareReadHighlight(
+    const highlighted = prepareSourceHighlight({
       source,
-      expanded ? lines : lines.slice(0, limit),
-      args,
+      lines: preview.items,
+      path: localPath(readPath(args), context.cwd),
+      from: firstLine(args) - 1,
+      region: "read",
+      state: context.state as SourceHighlightState,
       theme,
       context,
       config,
+    })
+    output.push(
+      ...renderReadLines(
+        preview.items,
+        firstLine(args),
+        highlighted,
+        theme,
+        lineNumberWidth(firstLine(args) + lines.length - 1),
+      ),
     )
-    output.push(...renderReadLines(lines, visible, firstLine(args), highlighted, theme))
   }
   if (parsed.notice) {
     let color: "muted" | "warning" | "dim" = "dim"
     if (parsed.image) color = "muted"
     else if (parsed.truncated) color = "warning"
-    output.push(theme.fg(color, printable(parsed.notice)))
+    output.push(...preview.warnings.map((line) => theme.fg(color, line)))
   }
+  if (preview.hidden) output.push(hiddenNotice(preview.hidden, theme))
   return reuseText(context.lastComponent, `\n${output.join("\n")}`)
 }
 

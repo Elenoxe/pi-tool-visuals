@@ -22,6 +22,7 @@ export const toolVisualsConfigSchema = Type.Object(
   {
     enabled: Type.Boolean(),
     collapsedLines: positiveInteger,
+    pathIcons: Type.Union([Type.Literal("unicode"), Type.Literal("nerd"), Type.Literal("off")]),
     highlight: highlightConfigSchema,
     codemode: Type.Object(
       {
