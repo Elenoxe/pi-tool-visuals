@@ -26,27 +26,16 @@ function shellText(text: string): string {
   return printable(stripTerminalSequences(text))
 }
 
-function parseShellResult(
-  result: ToolResult & { structuredContent?: unknown },
-  context: RenderContext,
-  partial: boolean,
-) {
+function parseShellResult(result: ToolResult, context: RenderContext, partial: boolean) {
   let source = textOutput(result)
   let status: string | undefined
   if (context.isError && !partial) {
     const separator = source.lastIndexOf("\n\n")
     const candidate = separator < 0 ? source : source.slice(separator + 2)
-    const structured = result.structuredContent
-    const code =
-      structured && typeof structured === "object" && "exit_code" in structured
-        ? structured.exit_code
-        : undefined
     const timeout = (context.args as Partial<BashToolInput> | undefined)?.timeout
+    // shortcut: native-looking program output can match; use structured status if Pi exposes it.
     if (
-      (typeof code === "number" &&
-        Number.isSafeInteger(code) &&
-        code !== 0 &&
-        candidate === `Command exited with code ${code}`) ||
+      /^Command exited with code -?[1-9]\d*$/.test(candidate) ||
       candidate === "Command aborted" ||
       candidate === "Command terminated without an exit code" ||
       (typeof timeout === "number" &&

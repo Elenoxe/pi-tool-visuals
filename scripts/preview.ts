@@ -234,6 +234,13 @@ const fixtures: Fixture[] = [
   ),
   textFixture(
     "bash",
+    { command: "bun run typecheck" },
+    "Compiling...\nsrc/index.ts:42:7: error TS2322\n\nCommand exited with code 2",
+    2300,
+    { isError: true },
+  ),
+  textFixture(
+    "bash",
     { command: "printf 'Starting job\\n'\nsleep 60", timeout: 1 },
     "Starting job\n\nCommand timed out after 1 seconds",
     1_014,

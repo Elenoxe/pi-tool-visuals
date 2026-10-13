@@ -143,24 +143,28 @@ test("reuses streaming previews, safely strips terminal controls, and only label
   expect(context.lastComponent).toBe(component)
 })
 
-test("colors only corroborated final Pi status, never keywords in program logs", () => {
+test("colors only final native-format failure status, never keywords in program logs", () => {
   const foreground = spyOn(theme, "fg")
   const logs = "Compiling...\nerror TS2322\nfatal: failed is ordinary program output"
   const status = "Command exited with code 2"
   const cases = [
-    { isError: true, structuredContent: { exit_code: 2 }, isPartial: false, expected: [status] },
-    { isError: true, structuredContent: { exit_code: 3 }, isPartial: false, expected: [] },
-    { isError: true, structuredContent: undefined, isPartial: false, expected: [] },
-    { isError: false, structuredContent: { exit_code: 2 }, isPartial: false, expected: [] },
-    { isError: true, structuredContent: { exit_code: 2 }, isPartial: true, expected: [] },
+    { isError: true, isPartial: false, suffix: status, expected: [status] },
+    { isError: false, isPartial: false, suffix: status, expected: [] },
+    { isError: true, isPartial: true, suffix: status, expected: [] },
+    { isError: true, isPartial: false, suffix: "Command exited with code 0", expected: [] },
+    {
+      isError: true,
+      isPartial: false,
+      suffix: "Command exited with code -2",
+      expected: ["Command exited with code -2"],
+    },
+    { isError: true, isPartial: false, suffix: status + "\n\nMore output", expected: [] },
+    { isError: true, isPartial: false, suffix: "error: failed", expected: [] },
   ]
   for (const entry of cases) {
     foreground.mockClear()
     context.isError = entry.isError
-    const result = {
-      ...textResult(logs + "\n\n" + status),
-      structuredContent: entry.structuredContent,
-    }
+    const result = textResult(logs + "\n\n" + entry.suffix)
     const original = structuredClone(result)
     const output = plain(render(result, { isPartial: entry.isPartial })).join("\n")
     expect(
@@ -170,7 +174,7 @@ test("colors only corroborated final Pi status, never keywords in program logs",
       foreground.mock.calls.filter(([color]) => color === "toolOutput").map(([, text]) => text),
     ).toContain("fatal: failed is ordinary program output")
     expect(output).toContain(logs)
-    expect(output).toContain(status)
+    expect(output).toContain(entry.suffix)
     expect(output).not.toContain("Exit code 2")
     expect(result).toEqual(original)
   }
@@ -212,16 +216,11 @@ test("replaces only verified truncation footers and keeps warnings and paths out
         (truncation.truncatedBy === "bytes" ? ` (${formatSize(truncation.maxBytes)} limit)` : "") +
         `. Full output: ${path}`
     const status = "\n\nCommand exited with code 2"
-    const baseline = plain(
-      render({ ...textResult(truncation.content + status), structuredContent: { exit_code: 2 } }),
-    )
-    const result = {
-      ...textResult(truncation.content + "\n\n[" + footer + "]" + status, {
-        truncation,
-        fullOutputPath: path,
-      }),
-      structuredContent: { exit_code: 2 },
-    }
+    const baseline = plain(render(textResult(truncation.content + status)))
+    const result = textResult(truncation.content + "\n\n[" + footer + "]" + status, {
+      truncation,
+      fullOutputPath: path,
+    })
     const original = structuredClone(result)
     const collapsed = plain(render(result))
     expect(collapsed.slice(0, -3)).toEqual(baseline)
