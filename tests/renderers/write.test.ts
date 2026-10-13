@@ -75,7 +75,7 @@ test("previews the first configured lines with Read gutters, blanks, and dynamic
   const lines = Array.from({ length: 24 }, (_, index) =>
     index % 4 === 3 ? "" : `export const option${index + 1} = ${index + 1}`,
   )
-  context.args = { path: "src/config.ts", content: lines.join("\n") }
+  context.args = { path: "src/config.ts", content: lines.join("\n") + "\n" }
   const original = structuredClone(context.args)
   const rows = lines.map((line, index) => `${String(index + 1).padStart(4)} │ ${line}`.trimEnd())
   const title = "write src/config.ts · typescript · 24 lines · 18ms"
@@ -146,11 +146,7 @@ test("highlights recorded streaming arguments without disk reads or stale lines 
     path: "src/config.ts",
     content: source + '\ncomment */\nconst after = "\tready"\n',
   }
-  expect(draw().slice(-3)).toEqual([
-    "   3 │ comment */",
-    '   4 │ const after = "    ready"',
-    "   5 │",
-  ])
+  expect(draw().slice(-2)).toEqual(["   3 │ comment */", '   4 │ const after = "    ready"'])
   await ready()
   context.args = { path: "src/config.ts", content: 'const replaced = "new"\n\x1b[2J' }
   context.argsComplete = true
@@ -217,7 +213,39 @@ test("distinguishes missing content from an empty file and preserves newline-onl
   context.args = { path: "src/config.ts" }
   expect(draw()).toEqual(["write src/config.ts"])
   context.args = { path: "src/config.ts", content: "\n" }
-  expect(draw()).toEqual(["write src/config.ts · typescript · 2 lines", "", "   1 │", "   2 │"])
+  expect(draw()).toEqual(["write src/config.ts · typescript · 1 line", "", "   1 │"])
   context.args = { path: "notes.unknown", content: "plain text" }
   expect(draw()).toEqual(["write notes.unknown · 1 line", "", "   1 │ plain text"])
+})
+
+test.each([
+  { source: "", lines: [] },
+  { source: "value", lines: ["value"] },
+  { source: "value\n", lines: ["value"] },
+  { source: "\n", lines: [""] },
+  { source: "\n\n", lines: ["", ""] },
+  { source: "value\n\n", lines: ["value", ""] },
+  { source: "value\n\n\n", lines: ["value", "", ""] },
+  { source: "value \n \n", lines: ["value ", " "] },
+  { source: "value\r\n\r\n", lines: ["value", ""] },
+])("uses file line semantics for Write: %j", ({ source, lines }) => {
+  context.durationMs = undefined
+  context.args = { path: "notes.unknown", content: source }
+  config.collapsedLines = 1
+  const title = `write notes.unknown · ${lines.length} ${lines.length === 1 ? "line" : "lines"}`
+  const rows = lines.map((line, index) => `${String(index + 1).padStart(4)} │ ${line}`.trimEnd())
+  const foreground = spyOn(theme, "fg")
+  expect(draw()).toEqual([
+    title,
+    "",
+    ...(lines.length ? rows.slice(0, 1) : ["Empty file"]),
+    ...(lines.length > 1
+      ? [
+          `--- ${lines.length - 1} ${lines.length === 2 ? "line" : "lines"} hidden · ctrl+o to expand ---`,
+        ]
+      : []),
+  ])
+  context.expanded = true
+  expect(draw()).toEqual([title, "", ...(lines.length ? rows : ["Empty file"])])
+  for (const line of lines) expect(foreground.mock.calls).toContainEqual(["toolOutput", line])
 })

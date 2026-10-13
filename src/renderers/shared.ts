@@ -53,6 +53,14 @@ export function printable(text: string): string {
   return safeSource(text).replaceAll("\t", "    ")
 }
 
+export function splitFileLines(source: string): string[] {
+  if (source === "") return []
+  const lines = source.split("\n")
+  // A final newline terminates the last line; it does not start another one.
+  if (source.endsWith("\n")) lines.pop()
+  return lines
+}
+
 export function singleLine(text: string): string {
   return printable(text).replaceAll("\n", "␊")
 }

@@ -103,6 +103,38 @@ describe("collapsed and expanded Read", () => {
   })
 })
 
+test.each([
+  { source: "", lines: [] },
+  { source: "value", lines: ["value"] },
+  { source: "value\n", lines: ["value"] },
+  { source: "\n", lines: [""] },
+  { source: "\n\n", lines: ["", ""] },
+  { source: "value\n\n", lines: ["value", ""] },
+  { source: "value\n\n\n", lines: ["value", "", ""] },
+  { source: "value \n \n", lines: ["value ", " "] },
+  { source: "value\r\n\r\n", lines: ["value", ""] },
+])("uses file line semantics for Read: %j", ({ source, lines }) => {
+  config.collapsedLines = 1
+  const result = textResult(source)
+  const rows = lines.map((line, index) => `${String(index + 1).padStart(4)} │ ${line}`.trimEnd())
+  const foreground = spyOn(theme, "fg")
+  const plainRows = (expanded: boolean) =>
+    render(result, expanded)
+      .split("\n")
+      .map((line) => line.trimEnd())
+  expect(plainRows(false)).toEqual([
+    "",
+    ...(lines.length ? rows.slice(0, 1) : ["Empty file"]),
+    ...(lines.length > 1
+      ? [
+          `--- ${lines.length - 1} ${lines.length === 2 ? "line" : "lines"} hidden · ctrl+o to expand ---`,
+        ]
+      : []),
+  ])
+  expect(plainRows(true)).toEqual(["", ...(lines.length ? rows : ["Empty file"])])
+  for (const line of lines) expect(foreground.mock.calls).toContainEqual(["toolOutput", line])
+})
+
 describe("continuation notices and tool truncation", () => {
   test("removes a native limit continuation notice in both views", () => {
     context.args = { path: "source.ts", limit: 60 }

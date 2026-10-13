@@ -16,6 +16,7 @@ import {
   renderToolError,
   reuseText,
   selectPreview,
+  splitFileLines,
   textOutput,
   truncationNotice,
   type RenderContext as ReadContext,
@@ -134,9 +135,9 @@ function renderReadResult(
   const args = (context.args ?? {}) as ReadArgs
   const parsed = parseReadResult(result, args)
   // Read splits on LF. Strip only the CR associated with CRLF, preserving other characters.
-  const lines = parsed.source
-    ? parsed.source.split("\n").map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line))
-    : []
+  const lines = splitFileLines(parsed.source).map((line) =>
+    line.endsWith("\r") ? line.slice(0, -1) : line,
+  )
   const source = lines.join("\n")
   const preview = selectPreview(
     lines,

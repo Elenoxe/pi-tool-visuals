@@ -12,6 +12,7 @@ import {
   renderToolCall,
   renderToolError,
   reuseText,
+  splitFileLines,
 } from "./shared.ts"
 
 export function createWriteRenderer(getConfig: () => ToolVisualsConfig): ToolRenderers {
@@ -21,7 +22,7 @@ export function createWriteRenderer(getConfig: () => ToolVisualsConfig): ToolRen
       const args = rawArgs as Partial<WriteToolInput> | undefined
       const path = typeof args?.path === "string" ? args.path : ""
       const source = typeof args?.content === "string" ? printable(args.content) : undefined
-      const lines = source ? source.split("\n") : []
+      const lines = splitFileLines(source ?? "")
       const visible = context.expanded
         ? lines
         : lines.slice(0, resolveToolConfig(config, "write").collapsedLines)
