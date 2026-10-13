@@ -183,8 +183,8 @@ export function createShellRenderer(
             .join("\n")
         : options.isPartial || status
           ? ""
-          : theme.fg("dim", "(no output)")
-      if (!options.isPartial && source === "(no output)") body = theme.fg("dim", source)
+          : theme.fg("dim", "No output")
+      if (!options.isPartial && source === "(no output)") body = theme.fg("dim", "No output")
       if (status) body += (body ? "\n\n" : "") + theme.fg("error", status)
       const extras: string[] = []
       if (truncation) extras.push(theme.fg("warning", truncationNotice(truncation)))

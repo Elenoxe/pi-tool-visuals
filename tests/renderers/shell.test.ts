@@ -134,12 +134,12 @@ test("reuses streaming previews, safely strips terminal controls, and only label
   expect(raw).not.toContain("\x1b[31m")
   expect(raw).not.toContain("untrusted title")
   expect(raw).not.toContain("old ")
-  expect(raw).not.toContain("(no output)")
+  expect(raw).not.toContain("No output")
   expect(result).toEqual(original)
 
   expect(plain(render(textResult("done")))).toEqual(["", "done"])
-  expect(plain(render(textResult("")))).toEqual(["", "(no output)"])
-  expect(plain(render(textResult("(no output)")))).toEqual(["", "(no output)"])
+  expect(plain(render(textResult("")))).toEqual(["", "No output"])
+  expect(plain(render(textResult("(no output)")))).toEqual(["", "No output"])
   expect(context.lastComponent).toBe(component)
 })
 
