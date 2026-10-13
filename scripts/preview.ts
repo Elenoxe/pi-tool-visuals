@@ -1,7 +1,12 @@
 #!/usr/bin/env bun
 
 /** Create a synthetic Pi session to preview native tool renderers without running tools or a model. */
-import { SessionManager } from "@earendil-works/pi-coding-agent"
+import {
+  DEFAULT_MAX_BYTES,
+  formatSize,
+  SessionManager,
+  truncateTail,
+} from "@earendil-works/pi-coding-agent"
 import { mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, join, relative, resolve } from "node:path"
@@ -154,6 +159,13 @@ function lsFixture(path: string, durationMs: number, limit?: number): Fixture {
 }
 
 const paths = findPaths("src")
+const shellTruncation = truncateTail(
+  Array.from(
+    { length: 250 },
+    (_, index) => `file-${index + 1}.txt ${"recorded output ".repeat(25)}`,
+  ).join("\n"),
+)
+const shellOutputPath = join(tmpdir(), "pi-powershell-preview.log")
 const fixtures: Fixture[] = [
   // Read: long range, short file, and an execution error.
   readFixture("src/highlight/engine.ts", 18, { offset: 80, limit: 40 }),
@@ -211,6 +223,29 @@ const fixtures: Fixture[] = [
     "ENOENT: no such file or directory, scandir 'src/missing'",
     7,
     { isError: true },
+  ),
+  // Shell fixtures are recorded examples; no commands are executed.
+  textFixture(
+    "bash",
+    { command: 'for file in src/*.ts; do\n  echo "Checking $file"\ndone' },
+    Array.from({ length: 30 }, (_, index) => `Checking demo/file-${index + 1}.ts`).join("\n") +
+      "\n30 files checked\n0 errors",
+    86,
+  ),
+  textFixture(
+    "bash",
+    { command: "printf 'Starting job\\n'\nsleep 60", timeout: 1 },
+    "Starting job\n\nCommand timed out after 1 seconds",
+    1_014,
+    { isError: true },
+  ),
+  textFixture(
+    "powershell",
+    { command: "Get-ChildItem -Recurse |\n  Select-Object Name, Length" },
+    shellTruncation.content +
+      `\n\n[Showing lines ${shellTruncation.totalLines - shellTruncation.outputLines + 1}-${shellTruncation.totalLines} of ${shellTruncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Full output: ${shellOutputPath}]`,
+    2_340,
+    { details: { truncation: { ...shellTruncation }, fullOutputPath: shellOutputPath } },
   ),
 ]
 

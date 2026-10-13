@@ -6,6 +6,7 @@ import { createFindRenderer } from "./renderers/find.ts"
 import { createGrepRenderer } from "./renderers/grep.ts"
 import { createLsRenderer } from "./renderers/ls.ts"
 import { createReadRenderer } from "./renderers/read.ts"
+import { createShellRenderer } from "./renderers/shell.ts"
 import { createToolRendererResolver } from "./resolver.ts"
 
 export default function toolVisuals(pi: ExtensionAPI): void {
@@ -15,6 +16,8 @@ export default function toolVisuals(pi: ExtensionAPI): void {
     grep: createGrepRenderer(() => config),
     find: createFindRenderer(() => config),
     ls: createLsRenderer(() => config),
+    bash: createShellRenderer("bash", () => config),
+    powershell: createShellRenderer("powershell", () => config),
   }
 
   pi.registerToolRenderer(
