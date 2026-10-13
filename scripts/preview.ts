@@ -254,6 +254,31 @@ const fixtures: Fixture[] = [
     2_340,
     { details: { truncation: { ...shellTruncation }, fullOutputPath: shellOutputPath } },
   ),
+  // Write previews use recorded arguments; these files are never written.
+  textFixture(
+    "write",
+    {
+      path: "src/preview-config.ts",
+      content: Array.from({ length: 24 }, (_, index) =>
+        index % 4 === 3 ? "" : `export const option${index + 1} = ${index + 1}`,
+      ).join("\n"),
+    },
+    "Successfully wrote to src/preview-config.ts",
+    18,
+  ),
+  textFixture(
+    "write",
+    { path: "src/preview-empty.ts", content: "" },
+    "Successfully wrote to src/preview-empty.ts",
+    12,
+  ),
+  textFixture(
+    "write",
+    { path: "/read-only/preview.ts", content: 'export const value = "not written"\n' },
+    "EACCES: permission denied, open '/read-only/preview.ts'",
+    7,
+    { isError: true },
+  ),
 ]
 
 const directory = mkdtempSync(join(tmpdir(), "pi-tool-visuals-preview-"))
