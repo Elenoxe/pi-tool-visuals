@@ -209,6 +209,9 @@ test("distinguishes missing content from an empty file and preserves newline-onl
   expect(draw()).toEqual(["write src/config.ts"])
   context.args = { path: "src/config.ts", content: "" }
   const foreground = spyOn(theme, "fg")
+  expect(draw()).toEqual(["write src/config.ts · 0 lines"])
+  expect(foreground.mock.calls).not.toContainEqual(["dim", "Empty file"])
+  context.argsComplete = true
   expect(draw()).toEqual(["write src/config.ts · 0 lines", "", "Empty file"])
   expect(foreground.mock.calls).toContainEqual(["dim", "Empty file"])
   context.args = { path: "src/config.ts" }

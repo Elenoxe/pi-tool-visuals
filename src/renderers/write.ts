@@ -64,7 +64,7 @@ export function createWriteRenderer(getConfig: () => ToolVisualsConfig): ToolRen
           theme.fg("dim", `${String(index + 1).padStart(width, " ")} │ `) +
           (highlighted?.[index] ?? theme.fg("toolOutput", line)),
       )
-      if (source === "") output.push(theme.fg("dim", "Empty file"))
+      if (source === "" && context.argsComplete) output.push(theme.fg("dim", "Empty file"))
       if (lines.length > visible.length)
         output.push(hiddenNotice(lines.length - visible.length, theme))
       const preview = reuseText(
