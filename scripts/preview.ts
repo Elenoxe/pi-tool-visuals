@@ -1,13 +1,28 @@
 #!/usr/bin/env bun
 
-/** Create a synthetic Pi session to preview native tool renderers without running tools or a model. */
+/**
+ * bun scripts/preview.ts prints a session path; open it with:
+ * pi -e "$(pwd)/src/index.ts" --session <path>
+ * Edit examples run natively on temporary files only; Ctrl+O expands the recorded results.
+ */
 import {
+  createEditTool,
   DEFAULT_MAX_BYTES,
   formatSize,
   SessionManager,
   truncateTail,
+  type EditToolInput,
 } from "@earendil-works/pi-coding-agent"
-import { mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs"
+import assert from "node:assert/strict"
+import {
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -42,6 +57,87 @@ function textFixture(
       durationMs,
     },
   }
+}
+
+async function editFixtures(directory: string): Promise<Fixture[]> {
+  const oldConfig = [
+    'const baseUrl = "https://legacy.example.com"',
+    "const defaultHeaders = {}",
+    'const cacheMode: RequestCache = "no-store"',
+  ].join("\n")
+  const newConfig = [
+    'const baseUrl = "https://api.example.com"',
+    'const defaultHeaders = { Accept: "application/json" }',
+    'const cacheMode: RequestCache = "force-cache"',
+  ].join("\n")
+  const examples: {
+    file: string
+    source: string
+    edits: EditToolInput["edits"]
+    expectedError?: RegExp
+  }[] = [
+    {
+      file: "src/http-client.ts",
+      source: [
+        "export const timeout = 3_000",
+        "",
+        oldConfig,
+        "",
+        "export async function fetchUser(id: string) {",
+        "  const response = await fetch(`${baseUrl}/users/${id}`, {",
+        "    headers: defaultHeaders,",
+        "    cache: cacheMode,",
+        "    signal: AbortSignal.timeout(timeout),",
+        "  })",
+        "",
+        "  if (!response.ok) {",
+        "    throw new Error(`Request failed: ${response.status}`)",
+        "  }",
+        "",
+        "  return response.json()",
+        "}",
+        "",
+      ].join("\n"),
+      edits: [
+        { oldText: "export const timeout = 3_000", newText: "export const timeout = 8_000" },
+        { oldText: oldConfig, newText: newConfig },
+      ],
+    },
+    {
+      file: "src/worker.ts",
+      source: "export const concurrency = 4\nexport const retryLimit = 3\n",
+      edits: [
+        { oldText: "export const concurrency = 4", newText: "export const concurrency = 8" },
+        { oldText: "export const retryLimit = 1", newText: "export const retryLimit = 5" },
+      ],
+      expectedError: /Could not find edits\[1\]/,
+    },
+  ]
+
+  mkdirSync(join(directory, "src"), { recursive: true })
+  const tool = createEditTool(directory)
+  const fixtures: Fixture[] = []
+  for (const example of examples) {
+    writeFileSync(join(directory, example.file), example.source, { flag: "wx" })
+    const args: EditToolInput = { path: example.file, edits: example.edits }
+    const started = performance.now()
+    let result: Omit<Fixture["result"], "durationMs">
+    try {
+      result = { ...(await tool.execute(`preview-${example.file}`, args)), isError: false }
+    } catch (error) {
+      if (!example.expectedError) throw error
+      const message = error instanceof Error ? error.message : String(error)
+      assert.match(message, example.expectedError, example.file)
+      result = { content: [{ type: "text", text: message }], details: undefined, isError: true }
+    }
+    assert.equal(result.isError, Boolean(example.expectedError), example.file)
+    fixtures.push({
+      toolName: "edit",
+      args,
+      result: { ...result, durationMs: Math.round(performance.now() - started) },
+    })
+  }
+  return fixtures
 }
 
 function readFixture(
@@ -281,43 +377,48 @@ const fixtures: Fixture[] = [
   ),
 ]
 
-const directory = mkdtempSync(join(tmpdir(), "pi-tool-visuals-preview-"))
-const sessionPath = join(directory, "preview.jsonl")
-const session = SessionManager.open(sessionPath, undefined, root)
-const timestamp = Date.now()
-const zeroUsage = {
-  input: 0,
-  output: 0,
-  cacheRead: 0,
-  cacheWrite: 0,
-  totalTokens: 0,
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-}
-const calls: ToolCall[] = fixtures.map((fixture, index) => ({
-  type: "toolCall",
-  id: `preview-tool-${index + 1}`,
-  name: fixture.toolName,
-  arguments: fixture.args,
-}))
+if (import.meta.main) {
+  const directory = mkdtempSync(join(tmpdir(), "pi-tool-visuals-preview-"))
+  // Preserve real, relative paths for every renderer inside this isolated workspace.
+  cpSync(join(root, "src"), join(directory, "src"), { recursive: true })
+  const sessionPath = join(directory, "preview.jsonl")
+  const session = SessionManager.open(sessionPath, undefined, directory)
+  const timestamp = Date.now()
+  const zeroUsage = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  }
+  const recordedFixtures = [...fixtures, ...(await editFixtures(directory))]
+  const calls: ToolCall[] = recordedFixtures.map((fixture, index) => ({
+    type: "toolCall",
+    id: `preview-tool-${index + 1}`,
+    name: fixture.toolName,
+    arguments: fixture.args,
+  }))
 
-session.appendMessage({
-  role: "assistant",
-  content: calls,
-  api: "openai-responses",
-  provider: "openai-codex",
-  model: "gpt-6.1-sol",
-  usage: zeroUsage,
-  stopReason: "toolUse",
-  timestamp,
-})
-for (const [index, fixture] of fixtures.entries()) {
   session.appendMessage({
-    role: "toolResult",
-    toolCallId: calls[index]!.id,
-    toolName: fixture.toolName,
-    ...fixture.result,
+    role: "assistant",
+    content: calls,
+    api: "openai-responses",
+    provider: "openai-codex",
+    model: "gpt-6.1-sol",
+    usage: zeroUsage,
+    stopReason: "toolUse",
     timestamp,
   })
-}
+  for (const [index, fixture] of recordedFixtures.entries()) {
+    session.appendMessage({
+      role: "toolResult",
+      toolCallId: calls[index]!.id,
+      toolName: fixture.toolName,
+      ...fixture.result,
+      timestamp,
+    })
+  }
 
-console.log(sessionPath)
+  console.log(sessionPath)
+}

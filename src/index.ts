@@ -2,6 +2,7 @@ import type { ExtensionAPI, ToolRenderers } from "@earendil-works/pi-coding-agen
 
 import { createDefaultConfig, loadToolVisualsConfig } from "./config.ts"
 import { configureHighlighting, disposeHighlighting } from "./highlight/index.ts"
+import { createEditRenderer } from "./renderers/edit.ts"
 import { createFindRenderer } from "./renderers/find.ts"
 import { createGrepRenderer } from "./renderers/grep.ts"
 import { createLsRenderer } from "./renderers/ls.ts"
@@ -20,6 +21,7 @@ export default function toolVisuals(pi: ExtensionAPI): void {
     bash: createShellRenderer("bash", () => config),
     powershell: createShellRenderer("powershell", () => config),
     write: createWriteRenderer(() => config),
+    edit: createEditRenderer(() => config),
   }
 
   pi.registerToolRenderer(

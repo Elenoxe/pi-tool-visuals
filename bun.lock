@@ -5,6 +5,7 @@
     "": {
       "name": "@eleno/pi-tool-visuals",
       "dependencies": {
+        "diff": "8.0.4",
         "shiki": "4.4.3",
       },
       "devDependencies": {
