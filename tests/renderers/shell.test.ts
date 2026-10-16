@@ -235,6 +235,20 @@ test("replaces only verified truncation footers and keeps warnings and paths out
     expect(result).toEqual(original)
   }
 
+  context.isError = false
+  const shortTruncation = truncateTail("one\ntwo", { maxLines: 1 })
+  const shortResult = textResult(shortTruncation.content, {
+    truncation: shortTruncation,
+    fullOutputPath: path,
+  })
+  for (const name of ["bash", "powershell"] as const) {
+    renderer = createShellRenderer(name, () => config)
+    const expected = ["", "two", "", "Output truncated (1-line limit)", "Full output: " + path]
+    expect(plain(render(shortResult))).toEqual(expected)
+    expect(plain(render(shortResult, { expanded: true }))).toEqual(expected)
+    expect(plain(render(shortResult))).toEqual(expected)
+  }
+
   const truncation = truncations[0]!
   const footer = "\n\n[Showing lines 4-9 of 9. Full output: " + path + "]"
   const raw = truncation.content + footer
@@ -273,7 +287,7 @@ test.each(["bash", "powershell"] as const)(
     })
     const collapsed = draw()
     expect(collapsed).toEqual([
-      `${name} ${name === "bash" ? "$" : "PS>"} ${normalized.split("\n")[0]} … · 86ms`,
+      `${name} ${name === "bash" ? "$" : "PS>"} ${normalized.split("\n")[0]} … ${name === "bash" ? "2 more lines" : "1 more line"} · 86ms`,
     ])
     expect(foreground.mock.calls).toContainEqual(["accent", normalized.split("\n")[0]!])
     expect(request.mock.calls.at(-1)?.[0]).toMatchObject({

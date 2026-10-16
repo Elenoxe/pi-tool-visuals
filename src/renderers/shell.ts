@@ -147,7 +147,11 @@ export function createShellRenderer(
         cancelHighlightRequest(id)
       }
       const styled = visible.map((line, index) => highlighted?.[index] ?? theme.fg("accent", line))
-      const ellipsis = !context.expanded && lines.length > 1 ? theme.fg("dim", " …") : ""
+      const hidden = lines.length - 1
+      const ellipsis =
+        !context.expanded && hidden > 0
+          ? theme.fg("dim", ` … ${hidden} more ${hidden === 1 ? "line" : "lines"}`)
+          : ""
       const component =
         context.lastComponent instanceof Container ? context.lastComponent : new Container()
       const title = renderToolCall(
