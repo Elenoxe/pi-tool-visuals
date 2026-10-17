@@ -38,9 +38,10 @@ test("merges partial sections and tool overrides without changing the base", () 
     ...original,
     collapsedLines: 6,
     codemode: {
+      enabled: true,
       script: { ...original.codemode.script, showCollapsed: false },
       calls: { collapsedCount: 3 },
-      output: { collapsedLines: 2 },
+      output: { showWithCalls: false, collapsedLines: 2 },
       history: { maxBytes: 1024 },
     },
     tools: {
@@ -218,4 +219,29 @@ describe("configuration files", () => {
       { code: "invalid-json", message: expect.stringContaining(projectPath) },
     ])
   })
+})
+
+test("validates and merges dedicated Codemode enable and output settings across layers", () => {
+  const global = parseToolVisualsConfig({
+    codemode: { enabled: false, output: { showWithCalls: true, collapsedLines: 9 } },
+  })
+  expect(global.diagnostics).toEqual([])
+  const project = parseToolVisualsConfig(
+    { codemode: { enabled: true, output: { collapsedLines: 2 } } },
+    global.config,
+  )
+  expect(project.diagnostics).toEqual([])
+  expect(project.config.codemode.enabled).toBe(true)
+  expect(project.config.codemode.output).toEqual({ showWithCalls: true, collapsedLines: 2 })
+  expect(global.config.codemode.enabled).toBe(false)
+  for (const value of [
+    { enabled: "true" },
+    { output: { showWithCalls: 1 } },
+    { calls: { collapsedCount: 0 } },
+    { output: { collapsedLines: 0 } },
+  ]) {
+    const invalid = parseToolVisualsConfig({ codemode: value }, project.config)
+    expect(invalid.diagnostics.length).toBeGreaterThan(0)
+    expect(invalid.config).toEqual(project.config)
+  }
 })

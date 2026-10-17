@@ -68,3 +68,19 @@ test("preserves uncovered slots and shell settings, including when no downstream
     renderShell: undefined,
   })
 })
+
+test("codemode uses root and dedicated enable flags, not tools.codemode", () => {
+  const config = createDefaultConfig()
+  const resolver = createToolRendererResolver(
+    () => config,
+    () => ({ renderCall: enhancedCall }),
+  )
+  config.tools.codemode = { enabled: false }
+  expect(resolver("codemode", () => downstream)?.renderCall).toBe(enhancedCall)
+  config.codemode.enabled = false
+  config.tools.codemode.enabled = true
+  expect(resolver("codemode", () => downstream)).toBe(downstream)
+  config.codemode.enabled = true
+  config.enabled = false
+  expect(resolver("codemode", () => downstream)).toBe(downstream)
+})

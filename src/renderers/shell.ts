@@ -156,10 +156,11 @@ export function createShellRenderer(
         context.lastComponent instanceof Container ? context.lastComponent : new Container()
       const title = renderToolCall(
         name,
-        `${theme.fg("dim", prompt)} ${styled[0] ?? ""}${ellipsis}`,
+        args,
         [],
         theme,
         { ...context, lastComponent: component.children[0] },
+        `${theme.fg("dim", prompt)} ${styled[0] ?? ""}${ellipsis}`,
       )
       const indent = " ".repeat(name.length + prompt.length + 2)
       const continuation = reuseText(

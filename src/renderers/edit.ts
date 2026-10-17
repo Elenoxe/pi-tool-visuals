@@ -17,7 +17,6 @@ import {
   lineNumberWidth,
   localPath,
   printable,
-  renderPath,
   renderToolCall,
   renderToolError,
   reuseText,
@@ -420,13 +419,10 @@ function buildCall(
 ): Container {
   const raw = context.args as Record<string, unknown> | undefined
   const path = state.input?.path ?? (typeof raw?.path === "string" ? raw.path : "")
-  const title = renderToolCall(
-    "edit",
-    path ? renderPath(path, context.cwd, theme) : "",
-    [languageFromPath(path)],
-    theme,
-    { ...context, lastComponent: state.call.children[0] },
-  )
+  const title = renderToolCall("edit", { path }, [languageFromPath(path)], theme, {
+    ...context,
+    lastComponent: state.call.children[0],
+  })
   const body = renderDiff(state, theme, context, config)
   state.call.clear()
   state.call.addChild(title)

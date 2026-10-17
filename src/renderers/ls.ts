@@ -5,7 +5,6 @@ import type { ToolVisualsConfig } from "../types.ts"
 import {
   hiddenNotice,
   parseSearchResult,
-  renderPath,
   renderPathList,
   renderToolCall,
   renderToolError,
@@ -17,13 +16,7 @@ export function createLsRenderer(getConfig: () => ToolVisualsConfig): ToolRender
   return {
     renderCall(rawArgs, theme, context) {
       const args = (rawArgs ?? {}) as Partial<LsToolInput>
-      return renderToolCall(
-        "ls",
-        args.path ? renderPath(args.path, context.cwd, theme, false) : "",
-        [],
-        theme,
-        context,
-      )
+      return renderToolCall("ls", args, [], theme, context)
     },
     renderResult(result, options, theme, context) {
       if (context.isError) return renderToolError(result, options.expanded, theme, context)

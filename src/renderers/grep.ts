@@ -271,16 +271,9 @@ export function createGrepRenderer(getConfig: () => ToolVisualsConfig): ToolRend
   return {
     renderCall(rawArgs, theme, context) {
       const args = (rawArgs ?? {}) as Partial<GrepToolInput>
-      const flags = args.ignoreCase ? "i" : ""
-      const pattern = singleLine(args.pattern ?? "")
-      const query = args.literal ? JSON.stringify(pattern) : `/${pattern}/${flags}`
-      const location = args.path
-        ? ` ${theme.fg("muted", "in")} ${renderPath(args.path, context.cwd, theme)}`
-        : ""
-      const body = theme.fg("accent", query) + location
       return renderToolCall(
         "grep",
-        body,
+        args,
         [
           args.glob ? singleLine(args.glob) : undefined,
           args.literal && args.ignoreCase ? "ignore-case" : undefined,

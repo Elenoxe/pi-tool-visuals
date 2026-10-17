@@ -8,7 +8,6 @@ import {
   hiddenNotice,
   lineNumberWidth,
   printable,
-  renderPath,
   renderToolCall,
   renderToolError,
   reuseText,
@@ -49,7 +48,7 @@ export function createWriteRenderer(getConfig: () => ToolVisualsConfig): ToolRen
         context.lastComponent instanceof Container ? context.lastComponent : new Container()
       const title = renderToolCall(
         "write",
-        path ? renderPath(path, context.cwd, theme) : "",
+        args,
         [
           source ? language : undefined,
           source === undefined

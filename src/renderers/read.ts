@@ -11,7 +11,6 @@ import {
   localPath,
   prepareSourceHighlight,
   printable,
-  renderPath,
   renderToolCall,
   renderToolError,
   reuseText,
@@ -48,23 +47,7 @@ function firstLine(args: ReadArgs): number {
 
 function renderReadCall(args: ReadArgs, theme: Theme, context: ReadContext): Text {
   const path = readPath(args)
-  const start = firstLine(args)
-  const limit =
-    typeof args.limit === "number" && Number.isSafeInteger(args.limit) && args.limit > 0
-      ? args.limit
-      : undefined
-  let range = ""
-  if ((args.offset != null && args.offset !== 1) || args.limit != null) {
-    range = `:${start}`
-    if (limit !== undefined) range += `-${start + limit - 1}`
-  }
-  return renderToolCall(
-    "read",
-    (path ? renderPath(path, context.cwd, theme) : "") + (range ? theme.fg("warning", range) : ""),
-    [languageFromPath(path)],
-    theme,
-    context,
-  )
+  return renderToolCall("read", args, [languageFromPath(path)], theme, context)
 }
 
 function parseReadResult(result: ReadResult, args: ReadArgs): ParsedRead {

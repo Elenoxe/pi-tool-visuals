@@ -11,7 +11,12 @@ export function createToolRendererResolver(
 ): ToolRendererResolver {
   return (toolName, next) => {
     const downstream = next()
-    if (!resolveToolConfig(getConfig(), toolName).enabled) return downstream
+    const config = getConfig()
+    const enabled =
+      toolName === "codemode"
+        ? config.enabled && config.codemode.enabled
+        : resolveToolConfig(config, toolName).enabled
+    if (!enabled) return downstream
     const enhanced = getRenderer(toolName)
     if (!enhanced?.renderCall && !enhanced?.renderResult && !enhanced?.renderShell)
       return downstream

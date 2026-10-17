@@ -83,20 +83,76 @@ export function reuseText(previous: unknown, value: string): Text {
   return component
 }
 
-export function renderToolCall(
+/** Format a title without invoking a renderer or scheduling content highlighting. */
+export function renderToolCallTitle(
   name: string,
-  body: string,
-  metadata: (string | undefined)[],
+  rawArgs: unknown,
   theme: Theme,
-  context: RenderContext,
-): Text {
+  context: Pick<RenderContext, "cwd" | "durationMs">,
+  metadata: (string | undefined)[] = [],
+  bodyOverride?: string,
+): string {
+  const args = rawArgs && typeof rawArgs === "object" ? (rawArgs as Record<string, unknown>) : {}
+  const getString = (key: string) => {
+    const value = args[key]
+    return typeof value === "string" ? value : ""
+  }
+  const path = getString("path") || getString("file_path") || getString("file")
+  let body = ""
+  if (["read", "write", "edit", "ls"].includes(name)) {
+    body = path ? renderPath(path, context.cwd, theme, name !== "ls") : ""
+    if (name === "read" && ((args.offset != null && args.offset !== 1) || args.limit != null)) {
+      const start =
+        typeof args.offset === "number" && Number.isSafeInteger(args.offset)
+          ? Math.max(1, args.offset)
+          : 1
+      const limit =
+        typeof args.limit === "number" && Number.isSafeInteger(args.limit) && args.limit > 0
+          ? args.limit
+          : undefined
+      body += theme.fg("warning", `:${start}${limit === undefined ? "" : `-${start + limit - 1}`}`)
+    }
+  } else if (name === "bash" || name === "powershell") {
+    const command = getString("command")
+    if (command)
+      body =
+        theme.fg("dim", name === "bash" ? "$" : "PS>") +
+        " " +
+        theme.fg("accent", singleLine(command))
+  } else if (name === "grep" || name === "find") {
+    const pattern = singleLine(getString("pattern"))
+    if (typeof args.pattern === "string") {
+      let query = pattern
+      if (name === "grep" && args.literal) {
+        query = JSON.stringify(pattern)
+      } else if (name === "grep") {
+        const flags = args.ignoreCase ? "i" : ""
+        query = `/${pattern}/${flags}`
+      }
+      body = theme.fg("accent", query)
+    }
+    if (path)
+      body += ` ${theme.fg("muted", "in")} ${renderPath(path, context.cwd, theme, name !== "find")}`
+  }
   const values = metadata.filter((value): value is string => value !== undefined)
   if (typeof context.durationMs === "number" && Number.isFinite(context.durationMs))
     values.push(formatDuration(context.durationMs))
   const suffix = values.length ? theme.fg("dim", ` · ${values.join(" · ")}`) : ""
+  body = bodyOverride ?? body
+  return `${theme.fg("toolTitle", theme.bold(singleLine(name)))}${body ? ` ${body}` : ""}${suffix}`
+}
+
+export function renderToolCall(
+  name: string,
+  args: unknown,
+  metadata: (string | undefined)[],
+  theme: Theme,
+  context: RenderContext,
+  bodyOverride?: string,
+): Text {
   return reuseText(
     context.lastComponent,
-    `${theme.fg("toolTitle", theme.bold(name))}${body ? ` ${body}` : ""}${suffix}`,
+    renderToolCallTitle(name, args, theme, context, metadata, bodyOverride),
   )
 }
 

@@ -34,6 +34,7 @@ const configLayerSchema = partialObject({
   ...toolVisualsConfigSchema.properties,
   highlight: partialObject(toolVisualsConfigSchema.properties.highlight.properties),
   codemode: partialObject({
+    enabled: codemode.enabled,
     script: partialObject(codemode.script.properties),
     calls: partialObject(codemode.calls.properties),
     output: partialObject(codemode.output.properties),
@@ -48,9 +49,10 @@ export function createDefaultConfig(): ToolVisualsConfig {
     pathIcons: "unicode",
     highlight: { enable: true, theme: "auto" },
     codemode: {
+      enabled: true,
       script: { showCollapsed: false, collapsedLines: 12 },
       calls: { collapsedCount: 8 },
-      output: { collapsedLines: 5 },
+      output: { showWithCalls: false, collapsedLines: 5 },
       history: { maxBytes: 524288 },
     },
     tools: {},
@@ -78,6 +80,9 @@ export function parseToolVisualsConfig(
   config.highlight.enable = value.highlight?.enable ?? config.highlight.enable
   config.highlight.theme = value.highlight?.theme ?? config.highlight.theme
   const overrides = value.codemode
+  config.codemode.enabled = overrides?.enabled ?? config.codemode.enabled
+  config.codemode.output.showWithCalls =
+    overrides?.output?.showWithCalls ?? config.codemode.output.showWithCalls
   config.codemode.script.showCollapsed =
     overrides?.script?.showCollapsed ?? config.codemode.script.showCollapsed
   config.codemode.script.collapsedLines =

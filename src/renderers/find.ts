@@ -5,24 +5,18 @@ import type { ToolVisualsConfig } from "../types.ts"
 import {
   hiddenNotice,
   parseSearchResult,
-  renderPath,
   renderPathList,
   renderToolCall,
   renderToolError,
   reuseText,
   selectPreview,
-  singleLine,
 } from "./shared.ts"
 
 export function createFindRenderer(getConfig: () => ToolVisualsConfig): ToolRenderers {
   return {
     renderCall(rawArgs, theme, context) {
       const args = (rawArgs ?? {}) as Partial<FindToolInput>
-      const location = args.path
-        ? ` ${theme.fg("muted", "in")} ${renderPath(args.path, context.cwd, theme, false)}`
-        : ""
-      const body = theme.fg("accent", singleLine(args.pattern ?? "")) + location
-      return renderToolCall("find", body, [], theme, context)
+      return renderToolCall("find", args, [], theme, context)
     },
     renderResult(result, options, theme, context) {
       if (context.isError) return renderToolError(result, options.expanded, theme, context)

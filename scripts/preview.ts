@@ -11,6 +11,7 @@ import {
   formatSize,
   SessionManager,
   truncateTail,
+  type CodemodeToolDetails,
   type EditToolInput,
 } from "@earendil-works/pi-coding-agent"
 import assert from "node:assert/strict"
@@ -377,6 +378,81 @@ const fixtures: Fixture[] = [
   ),
 ]
 
+// Native Codemode snapshots, recorded examples only: nested tools are never executed here.
+const codemodeFixtures: Fixture[] = []
+const codemodeTools = [
+  { name: "read", args: { path: "src/config.ts", offset: 1, limit: 12 } },
+  { name: "bash", args: { command: "bun run typecheck" } },
+  { name: "powershell", args: { command: "Get-ChildItem src" } },
+  { name: "grep", args: { pattern: "enabled", path: "src", glob: "*.ts" } },
+  { name: "find", args: { pattern: "**/*.ts", path: "src" } },
+  { name: "ls", args: { path: "src/renderers" } },
+  { name: "write", args: { path: "src/output.ts", content: "export const ready = true\n" } },
+  {
+    name: "edit",
+    args: {
+      path: "src/config.ts",
+      edits: [{ oldText: "enabled: false", newText: "enabled: true" }],
+    },
+  },
+  { name: "read", args: { path: "src/types.ts" } },
+  { name: "read", args: { path: "src/renderers/shared.ts" } },
+  { name: "write", args: { path: "src/output.ts", content: "recorded content ".repeat(30) } },
+  {
+    name: "edit",
+    args: {
+      path: "src/config.ts",
+      edits: [{ oldText: "collapsedLines: 8", newText: "collapsedLines: 12" }],
+    },
+  },
+]
+const codemodeCalls: CodemodeToolDetails["calls"] = codemodeTools.map(({ name, args }, index) => {
+  const summary = JSON.stringify(args)
+  return {
+    id: `preview-codemode/${index + 1}`,
+    name,
+    args: summary.length > 200 ? summary.slice(0, 197) + "..." : summary,
+    status: "ok",
+    durationMs: 8 + index,
+  }
+})
+for (const example of [
+  {
+    code: [
+      '// @options: {"timeout_ms":60000}',
+      ...codemodeTools.map(({ name, args }) => `await tools.${name}(${JSON.stringify(args)})`),
+      'text("Tools complete")',
+    ].join("\n"),
+    calls: codemodeCalls,
+    output: "Tools complete",
+  },
+  {
+    code: 'try { await tools.edit({ path: "src/missing.ts", edits: [] }) }\ncatch (error) { text(error.message) }',
+    calls: [
+      {
+        ...codemodeCalls[11]!,
+        args: JSON.stringify({ path: "src/missing.ts", edits: [] }),
+        status: "error" as const,
+        error: "File not found: src/missing.ts",
+      },
+    ],
+    output: "File not found: src/missing.ts",
+  },
+  { code: "return 42", calls: [], output: "42" },
+]) {
+  const fixture = textFixture(
+    "codemode",
+    { code: example.code },
+    "Script completed\nWall time 0.1 seconds\nOutput:\n",
+    126,
+    {
+      details: { calls: example.calls.map((call) => ({ ...call })) } satisfies CodemodeToolDetails,
+    },
+  )
+  if (example.output) fixture.result.content.push({ type: "text", text: example.output })
+  codemodeFixtures.push(fixture)
+}
+
 if (import.meta.main) {
   const directory = mkdtempSync(join(tmpdir(), "pi-tool-visuals-preview-"))
   // Preserve real, relative paths for every renderer inside this isolated workspace.
@@ -392,7 +468,7 @@ if (import.meta.main) {
     totalTokens: 0,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
   }
-  const recordedFixtures = [...fixtures, ...(await editFixtures(directory))]
+  const recordedFixtures = [...fixtures, ...(await editFixtures(directory)), ...codemodeFixtures]
   const calls: ToolCall[] = recordedFixtures.map((fixture, index) => ({
     type: "toolCall",
     id: `preview-tool-${index + 1}`,

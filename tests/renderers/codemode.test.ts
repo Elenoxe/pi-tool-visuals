@@ -1,0 +1,498 @@
+import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test"
+import { stripVTControlCharacters } from "node:util"
+
+import type { CodemodeToolDetails, ToolRenderers } from "@earendil-works/pi-coding-agent"
+import {
+  getKeybindings,
+  KeybindingsManager,
+  setKeybindings,
+  stripTerminalSequences,
+  type Component,
+} from "@earendil-works/pi-tui"
+
+import { getThemeByName } from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js"
+import { createDefaultConfig } from "../../src/config.ts"
+import * as highlighting from "../../src/highlight/index.ts"
+import { createCodemodeRenderer } from "../../src/renderers/codemode.ts"
+import {
+  renderToolCallTitle,
+  type RenderContext,
+  type ToolResult,
+} from "../../src/renderers/shared.ts"
+
+type Call = CodemodeToolDetails["calls"][number]
+const theme = getThemeByName("dark")!
+let config: ReturnType<typeof createDefaultConfig>
+let renderer: ToolRenderers
+let context: RenderContext
+let callComponent: Component | undefined
+let resultComponent: Component | undefined
+let previousKeys: ReturnType<typeof getKeybindings>
+
+beforeEach(() => {
+  config = createDefaultConfig()
+  config.highlight.enable = false
+  renderer = createCodemodeRenderer(() => config)
+  callComponent = resultComponent = undefined
+  context = {
+    args: { code: '// @options: {"timeout_ms":60000}\nconst value = 42\nreturn value' },
+    toolCallId: "codemode-test",
+    cwd: process.cwd(),
+    state: {},
+    invalidate: mock(() => {}),
+    lastComponent: undefined,
+    executionStarted: true,
+    argsComplete: true,
+    isPartial: false,
+    expanded: false,
+    showImages: true,
+    isError: false,
+    durationMs: 1200,
+    outputPad: 0,
+  }
+  previousKeys = getKeybindings()
+  setKeybindings(new KeybindingsManager({ "app.tools.expand": { defaultKeys: "ctrl+o" } }))
+})
+
+afterEach(() => {
+  setKeybindings(previousKeys)
+  highlighting.disposeHighlighting()
+  mock.restore()
+})
+
+function call(index: number, status: Call["status"] = "ok"): Call {
+  return {
+    id: `test/${index}`,
+    name: "read",
+    args: JSON.stringify({ path: `src/file-${index}.ts` }),
+    status,
+    durationMs: index,
+  }
+}
+
+function result(calls: Call[] = [], text = ""): ToolResult {
+  return {
+    content: [
+      {
+        type: "text",
+        text: `Script ${context.isError ? "failed" : "completed"}\nWall time 1.2 seconds\nOutput:\n`,
+      },
+      ...(text ? [{ type: "text" as const, text }] : []),
+    ],
+    details: { calls },
+  }
+}
+
+function draw(value?: ToolResult, width = 160): string[] {
+  callComponent = renderer.renderCall!(context.args, theme, {
+    ...context,
+    lastComponent: callComponent,
+  })
+  if (value)
+    resultComponent = renderer.renderResult!(
+      value,
+      { expanded: context.expanded, isPartial: context.isPartial },
+      theme,
+      { ...context, lastComponent: resultComponent },
+    )
+  return [callComponent, ...(value && resultComponent ? [resultComponent] : [])]
+    .flatMap((component) => component.render(width))
+    .map((line) => stripTerminalSequences(line).trimEnd())
+}
+
+test("renders native titles, stats, costs and errors without conflating nested failure and script failure", () => {
+  const calls: Call[] = [
+    call(1),
+    { ...call(2, "error"), name: "edit", error: "EACCES\npermission denied" },
+    { ...call(3), name: "bash", args: '{"command":"bun test"}' },
+    { ...call(4), name: "write", cost: 0.00012 },
+    { ...call(5, "cancelled"), name: "find", args: '{"pattern":"**/*.ts","path":"src"}' },
+  ]
+  expect(draw(result(calls))).toEqual([
+    "codemode · 1.2s",
+    "",
+    "✗ Tools · 5 calls · 1 failed",
+    "› read src/file-1.ts · 1ms",
+    "✗ edit src/file-2.ts · 2ms",
+    "› bash $ bun test · 3ms",
+    "› write src/file-4.ts · 4ms · $0.00012",
+    "⊘ find **/*.ts in src · 5ms",
+    "",
+    "--- 2 lines hidden · ctrl+o to expand ---",
+  ])
+  config.codemode.output.showWithCalls = true
+  expect(draw(result(calls, "caught error")).join("\n")).toContain(
+    "⊘ find **/*.ts in src · 5ms\n\n↩ return\ncaught error",
+  )
+  context.expanded = true
+  expect(draw(result(calls)).join("\n")).toContain("    EACCES\n    permission denied")
+  context.expanded = false
+  context.isError = true
+  expect(draw(result([call(1)]))).toContain("✗ Tools · 1 call")
+})
+
+test("keeps earliest completed calls and expands all calls without a second cap", () => {
+  const calls = Array.from({ length: 40 }, (_, i) => call(i + 1))
+  const value = result(calls)
+  const original = structuredClone(value)
+  const collapsed = draw(value)
+  expect(collapsed.slice(3, 11)).toEqual(
+    calls.slice(0, 8).map((_, i) => `› read src/file-${i + 1}.ts · ${i + 1}ms`),
+  )
+  expect(collapsed.slice(-3)).toEqual(["...", "", "--- 32 lines hidden · ctrl+o to expand ---"])
+  expect(collapsed.filter((line) => line.includes("hidden"))).toHaveLength(1)
+  context.expanded = true
+  expect(draw(value).filter((line) => line.startsWith("› read"))).toHaveLength(40)
+  expect(draw(value).some((line) => line.includes("hidden"))).toBe(false)
+  expect(value).toEqual(original)
+})
+
+test("running selection prioritizes active calls, then earliest calls in occurrence order", () => {
+  context.isPartial = true
+  expect(draw()).toEqual(["codemode", "", "◆ Running…"])
+  const calls = Array.from({ length: 12 }, (_, i) => call(i + 1, i >= 10 ? "running" : "ok"))
+  const value = result(calls)
+  const lines = draw(value)
+  expect(lines).toContain("◆ Tools running · 10/12 calls")
+  expect(lines.filter((line) => /^[›…] read/.test(line))).toEqual([
+    ...calls.slice(0, 6).map((_, i) => `› read src/file-${i + 1}.ts · ${i + 1}ms`),
+    "… read src/file-11.ts · 11ms",
+    "… read src/file-12.ts · 12ms",
+  ])
+  for (const item of calls) item.status = "running"
+  expect(draw(value).filter((line) => line.startsWith("… read"))).toHaveLength(8)
+  expect(draw(value).find((line) => line.startsWith("… read"))).toBe("… read src/file-5.ts · 5ms")
+  for (const item of calls) item.status = "ok"
+  context.isPartial = false
+  expect(draw(value)[0]).toBe("codemode · 1.2s")
+  expect(draw(value)[3]).toBe("› read src/file-1.ts · 1ms")
+  expect(draw(value).join("\n")).not.toContain("Running")
+})
+
+test.each([
+  ["read", '{"path":"src/config.ts","limit":12}', "read src/config.ts:1-12"],
+  ["write", '{"path":"src/output.ts","content":"incomplete...', "write src/output.ts"],
+  ["read", '{"path":"src/config.ts"...', "read src/config.ts"],
+  ["read", '{"path":"src/partial...', "read"],
+  ["edit", '{"edits":[{"path":"fake.ts","oldText":"x...', "edit"],
+  ["read", '{"note":"fake, \\"path\\": \\"evil\\"","path":"src/partial...', "read"],
+  ["read", '{"path":"src/a,b.ts","content":"...', "read src/a,b.ts"],
+  ["bash", '{"command":"bun test","unused":"...', "bash $ bun test"],
+  ["bash", '{"command":"bun te...', "bash"],
+  ["grep", '{"pattern":"config","ignoreCase":true,"path":"src"}', "grep /config/i in src"],
+  ["read", "not json", "read"],
+])("formats complete fields only: %s %s", (name, args, expected) => {
+  expect(draw(result([{ id: "1", name, args, status: "ok" }]))[3]).toBe("› " + expected)
+})
+
+test("renders Completed and folds final output by wrapped terminal rows", () => {
+  expect(draw(result())).toEqual(["codemode · 1.2s", "", "✓ Completed"])
+  expect(draw(result([], "42"))).toEqual(["codemode · 1.2s", "", "✓ Completed", "↩ return", "42"])
+  config.codemode.output.collapsedLines = 2
+  const text = "a".repeat(90)
+  const lines = draw(result([], text), 40)
+  expect(lines.filter((line) => line.startsWith("a"))).toHaveLength(2)
+  expect(lines.join("\n")).toContain("1 line hidden")
+  context.expanded = true
+  expect(draw(result([], text), 40).filter((line) => line.startsWith("a"))).toHaveLength(3)
+})
+
+test("uses one dynamic folding notice for omitted calls, source and output", () => {
+  config.codemode.script.showCollapsed = true
+  config.codemode.script.collapsedLines = 1
+  config.codemode.calls.collapsedCount = 1
+  config.codemode.output.collapsedLines = 1
+  const value = result([call(1), call(2), call(3)], "first\nsecond\nthird")
+  // Two source rows + two calls + three intentionally hidden output rows.
+  expect(draw(value).at(-1)).toBe("--- 7 lines hidden · ctrl+o to expand ---")
+  config.codemode.output.showWithCalls = true
+  const lines = draw(value)
+  expect(lines.at(-1)).toBe("--- 6 lines hidden · ctrl+o to expand ---")
+  expect(lines).toContain("first")
+  expect(lines.filter((line) => line.includes("hidden"))).toHaveLength(1)
+  getKeybindings().setUserBindings({ "app.tools.expand": "alt+o" })
+  expect(draw(value).at(-1)).toContain("alt+o to expand")
+  config.codemode.script.showCollapsed = false
+  expect(draw(value).at(-1)).toContain("4 lines hidden")
+  context.expanded = true
+  expect(draw(value).slice(1, 4)).toEqual([
+    '// @options: {"timeout_ms":60000}',
+    "const value = 42",
+    "return value",
+  ])
+  expect(draw(value).join("\n")).toContain("second\nthird")
+})
+
+test("hides failed script details collapsed but preserves output, errors and full output path expanded", () => {
+  context.isError = true
+  config.codemode.output.showWithCalls = true
+  const value = result([call(1)], "partial output\nScript error:\nactual failure")
+  value.details = { calls: [call(1)], fullOutputPath: "/tmp/codemode-full.txt" }
+  expect(draw(value)).toContain("✗ Tools · 1 call")
+  expect(draw(value).join("\n")).not.toContain("actual failure")
+  expect(draw(value).join("\n")).toContain("Full output: /tmp/codemode-full.txt")
+  context.expanded = true
+  const lines = draw(value)
+  expect(lines.join("\n")).toContain("partial output\nScript error:\nactual failure")
+  expect(lines.join("\n")).not.toContain("Script failed\nWall time")
+  context.expanded = false
+  expect(draw(result())).toContain("✗ Failed")
+  expect(
+    draw({ content: [{ type: "text", text: "invalid options" }], details: undefined }).join("\n"),
+  ).not.toContain("invalid options")
+})
+
+test("does not infer failure from text and leaves native image blocks untouched", () => {
+  const value = result([], "Script failed\nconsole.error is ordinary output")
+  value.content.push({ type: "image", data: "base64", mimeType: "image/png" })
+  const original = structuredClone(value)
+  expect(draw(value)).toContain("✓ Completed")
+  expect(draw(value)).toContain("Script failed")
+  expect(value).toEqual(original)
+  context.isPartial = true
+  expect(draw(value).join("\n")).not.toContain("console.error")
+})
+
+test("rehydrates the same preview from serialized native arguments and details without live state", () => {
+  const value = result(
+    Array.from({ length: 10 }, (_, i) => call(i)),
+    "recorded output",
+  )
+  context.expanded = true
+  const expected = draw(value)
+  const originalArgs = structuredClone(context.args)
+  context = { ...context, state: {}, args: JSON.parse(JSON.stringify(context.args)) }
+  callComponent = resultComponent = undefined
+  renderer = createCodemodeRenderer(() => config)
+  expect(draw(JSON.parse(JSON.stringify(value)))).toEqual(expected)
+  expect(context.args).toEqual(originalArgs)
+})
+
+test("shares ordinary title formatting and requests only JavaScript source highlighting", () => {
+  const title = stripVTControlCharacters(
+    renderToolCallTitle("read", { path: "src/a.ts", offset: 3, limit: 2 }, theme, context),
+  )
+  expect(
+    draw(
+      result([
+        {
+          id: "1",
+          name: "read",
+          args: '{"path":"src/a.ts","offset":3,"limit":2}',
+          status: "ok",
+          durationMs: 1200,
+        },
+      ]),
+    )[3],
+  ).toBe("› " + title)
+  const highlight = spyOn(highlighting, "highlightDocument").mockReturnValue(["HIGHLIGHTED"])
+  const file = spyOn(highlighting, "highlightFileDocument")
+  config.highlight.enable = true
+  config.codemode.script.showCollapsed = true
+  config.codemode.script.collapsedLines = 1
+  context.argsComplete = false
+  expect(draw(result())[1]).toBe("HIGHLIGHTED")
+  expect(highlight).toHaveBeenCalledWith(
+    expect.objectContaining({
+      source: (context.args as { code: string }).code,
+      language: "javascript",
+      from: 0,
+      to: 1,
+      streaming: true,
+    }),
+  )
+  expect(file).not.toHaveBeenCalled()
+  context.expanded = true
+  draw(result())
+  expect(highlight.mock.calls.at(-1)?.[0].to).toBe(3)
+})
+
+test("preserves leading blank lines and header-like output in both native block layouts", () => {
+  const expected = ["", "indented output"]
+  expect(draw(result([], "\nindented output")).slice(-2)).toEqual(expected)
+  const combined = result([], "unused")
+  combined.content = [
+    { type: "text", text: "Script completed\nWall time 0.1 seconds\nOutput:\n\nindented output" },
+  ]
+  expect(draw(combined).slice(-2)).toEqual(expected)
+  const noHeader: ToolResult = {
+    content: [{ type: "text", text: "\nindented output" }],
+    details: undefined,
+  }
+  expect(draw(noHeader).slice(-2)).toEqual(expected)
+})
+
+test("uses error statistics for failed calls even while other calls are still running", () => {
+  context.isPartial = true
+  const lines = draw(result([call(1, "error"), call(2, "running")]))
+  expect(lines).toContain("✗ Tools running · 1/2 calls · 1 failed")
+})
+
+test("keeps unknown tool arguments before timing, costs including zero, and paths without output", () => {
+  const value = result([
+    {
+      id: "model",
+      name: "models.classify",
+      args: '{"provider":"demo"}',
+      status: "ok",
+      durationMs: 32,
+      cost: 0,
+    },
+  ])
+  expect(draw(value)).toContain('› models.classify {"provider":"demo"} · 32ms · $0.0')
+  value.details = { calls: [], fullOutputPath: "/tmp/codemode-empty.txt" }
+  expect(draw(value)).toContain("Full output: /tmp/codemode-empty.txt")
+})
+
+test("counts indented, wrapped error details from every call in the unified folding notice", () => {
+  config.codemode.calls.collapsedCount = 1
+  const value = result(
+    [
+      { ...call(1, "error"), error: "first\nsecond" },
+      { ...call(2, "error"), error: "third\nfourth" },
+    ],
+    "output one\noutput two",
+  )
+  const original = structuredClone(value)
+  const collapsed = draw(value)
+  expect(collapsed.at(-1)).toBe("--- 7 lines hidden · ctrl+o to expand ---")
+  expect(collapsed.filter((line) => line.includes("hidden"))).toHaveLength(1)
+  expect(collapsed.join("\n")).not.toContain("first")
+  expect(collapsed.join("\n")).not.toContain("third")
+  context.expanded = true
+  const expanded = draw(value)
+  expect(expanded).toContain("    first")
+  expect(expanded).toContain("    second")
+  expect(expanded).toContain("    third")
+  expect(expanded).toContain("    fourth")
+  expect(expanded.some((line) => line.includes("hidden"))).toBe(false)
+  expect(value).toEqual(original)
+})
+
+test("counts a single error using the same indentation and wrapping as its expanded rows", () => {
+  const value = result([{ ...call(1, "error"), error: "x".repeat(21) + "\nshort" }])
+  expect(draw(value).at(-1)).toBe("--- 2 lines hidden · ctrl+o to expand ---")
+  expect(draw(value, 24).join("\n")).toContain("3 lines hidden")
+  context.expanded = true
+  const expanded = draw(value, 24)
+  expect(expanded.slice(-3)).toEqual(["", "x".repeat(21), "    short"])
+  expect(expanded.some((line) => line.includes("hidden"))).toBe(false)
+})
+
+test("keeps the native full-output notice without repeating its path once fully visible", () => {
+  const path = "/tmp/pi-codemode-full.txt"
+  const notice = `[Full output: ${path} (read with offset/limit)]`
+  const value = result([], "first\nsecond\n\n" + notice)
+  value.details = { calls: [], fullOutputPath: path }
+  const original = structuredClone(value)
+  config.codemode.output.collapsedLines = 1
+  const collapsed = draw(value)
+  expect(collapsed).toContain("Full output: " + path)
+  expect(collapsed).not.toContain(notice)
+  expect(collapsed.at(-1)).toBe("--- 3 lines hidden · ctrl+o to expand ---")
+  config.codemode.output.collapsedLines = 10
+  expect(draw(value)).toContain(notice)
+  expect(draw(value).filter((line) => line.includes(path))).toHaveLength(1)
+  context.expanded = true
+  const expanded = draw(value)
+  expect(expanded).toContain(notice)
+  expect(expanded.filter((line) => line.includes(path))).toHaveLength(1)
+  expect(expanded.some((line) => line.includes("hidden"))).toBe(false)
+  expect(value).toEqual(original)
+})
+
+test("only suppresses a matching native notice when all of its wrapped rows are visible", () => {
+  const path = "/tmp/c.txt"
+  const notice = `[Full output: ${path} (read with offset/limit)]`
+  const value = result([], notice + "\nlast line")
+  value.details = { calls: [], fullOutputPath: path }
+  config.codemode.output.collapsedLines = 1
+  expect(draw(value, 40).filter((line) => line.startsWith("Full output:"))).toEqual([
+    "Full output: " + path,
+  ])
+  config.codemode.output.collapsedLines = 2
+  const collapsed = draw(value, 40)
+  expect(collapsed.some((line) => line.startsWith("Full output:"))).toBe(false)
+  expect(collapsed.join("\n")).toContain("1 line hidden")
+  context.expanded = true
+  expect(draw(value, 40).some((line) => line.startsWith("Full output:"))).toBe(false)
+})
+
+test.each([false, true])(
+  "keeps a separate full-output path for hidden output, script error: %s",
+  (isError) => {
+    context.isError = isError
+    const path = "/tmp/pi-codemode-full.txt"
+    const notice = `[Full output: ${path} (read with offset/limit)]`
+    const value = result([call(1)], "partial output\n\n" + notice)
+    value.details = { calls: [call(1)], fullOutputPath: path }
+    const collapsed = draw(value)
+    expect(collapsed).toContain("Full output: " + path)
+    expect(collapsed).not.toContain(notice)
+    context.expanded = true
+    const expanded = draw(value)
+    expect(expanded).toContain(notice)
+    expect(expanded.filter((line) => line.includes(path))).toHaveLength(1)
+  },
+)
+
+test.each([
+  "[Full output: /tmp/other.txt (read with offset/limit)]",
+  "prefix [Full output: /tmp/c.txt (read with offset/limit)]",
+  "[Full output: /tmp/c.txt (read with offset/limit)] suffix",
+  "[Full output: /tmp/c.txt (read with offset/limit",
+])("preserves similar script text without treating it as the native path notice: %s", (text) => {
+  const value = result([], text)
+  value.details = { calls: [], fullOutputPath: "/tmp/c.txt" }
+  context.expanded = true
+  const lines = draw(value)
+  expect(lines).toContain(text)
+  expect(lines).toContain("Full output: /tmp/c.txt")
+})
+
+test("source regions render only visible rows and count omitted rows at the terminal width", () => {
+  config.codemode.script.showCollapsed = true
+  config.codemode.script.collapsedLines = 1
+  const source = ["a".repeat(45), "b".repeat(65), "", "c".repeat(81)]
+  context.args = { code: source.join("\n") }
+  const foreground = spyOn(theme, "fg")
+  const value = result()
+  const collapsed = draw(value, 40)
+  expect(collapsed.slice(1, 3)).toEqual(["a".repeat(40), "a".repeat(5)])
+  expect(collapsed.join("\n")).toContain("6 lines hidden")
+  for (const line of source)
+    expect(
+      foreground.mock.calls.filter(([color, text]) => color === "toolOutput" && text === line),
+    ).toHaveLength(1)
+  foreground.mockClear()
+  expect(draw(value, 60).join("\n")).toContain("5 lines hidden")
+  context.expanded = true
+  foreground.mockClear()
+  const expanded = draw(value, 40)
+  expect(expanded.some((line) => line.includes("hidden"))).toBe(false)
+  for (const line of source)
+    expect(
+      foreground.mock.calls.filter(([color, text]) => color === "toolOutput" && text === line),
+    ).toHaveLength(1)
+  context.expanded = false
+  config.codemode.script.showCollapsed = false
+  foreground.mockClear()
+  expect(draw(value, 40).some((line) => line.includes("hidden"))).toBe(false)
+  expect(foreground.mock.calls.some(([color]) => color === "toolOutput")).toBe(false)
+})
+
+test("counts wrapped source before a first result without repeating the source preview", () => {
+  config.codemode.script.showCollapsed = true
+  config.codemode.script.collapsedLines = 1
+  context.isPartial = true
+  context.args = { code: "visible\n" + "x".repeat(65) }
+  const foreground = spyOn(theme, "fg")
+  const running = draw(undefined, 40)
+  expect(running[1]).toBe("visible")
+  expect(running).toContain("◆ Running…")
+  expect(running.join("\n")).toContain("2 lines hidden")
+  for (const text of ["visible", "x".repeat(65)])
+    expect(
+      foreground.mock.calls.filter(([color, value]) => color === "toolOutput" && value === text),
+    ).toHaveLength(1)
+})

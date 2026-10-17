@@ -26,12 +26,16 @@ export const toolVisualsConfigSchema = Type.Object(
     highlight: highlightConfigSchema,
     codemode: Type.Object(
       {
+        enabled: Type.Boolean(),
         script: Type.Object(
           { showCollapsed: Type.Boolean(), collapsedLines: positiveInteger },
           closed,
         ),
         calls: Type.Object({ collapsedCount: positiveInteger }, closed),
-        output: Type.Object({ collapsedLines: positiveInteger }, closed),
+        output: Type.Object(
+          { showWithCalls: Type.Boolean(), collapsedLines: positiveInteger },
+          closed,
+        ),
         history: Type.Object({ maxBytes: positiveInteger }, closed),
       },
       closed,
