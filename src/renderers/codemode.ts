@@ -1,5 +1,5 @@
 import type { CodemodeToolDetails, ToolRenderers } from "@earendil-works/pi-coding-agent"
-import { Text, type Component } from "@earendil-works/pi-tui"
+import { Text, truncateToWidth, type Component } from "@earendil-works/pi-tui"
 
 import { cancelHighlightRequest, highlightDocument } from "../highlight/index.ts"
 import type { ToolVisualsConfig } from "../types.ts"
@@ -20,7 +20,7 @@ type Call = CodemodeToolDetails["calls"][number]
 type State = { hasResult?: boolean }
 
 /** Recover only complete top-level fields; never guess the end of a truncated value. */
-function callArgs(summary: string): unknown {
+function parseCallArgsPreview(summary: string): unknown {
   try {
     return JSON.parse(summary)
   } catch {
@@ -38,6 +38,72 @@ function callArgs(summary: string): unknown {
   }
 }
 
+function summarizeCallArgs(rawArgs: unknown): string {
+  if (!rawArgs || typeof rawArgs !== "object" || Array.isArray(rawArgs)) return ""
+  const outer = rawArgs as Record<string, unknown>
+  for (const candidate of [
+    outer,
+    outer.input,
+    outer.args,
+    outer.arguments,
+    outer.params,
+    outer.payload,
+  ]) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue
+    const args = candidate as Record<string, unknown>
+    const string = (...keys: string[]) => {
+      for (const key of keys) {
+        const value = args[key]
+        if (typeof value === "string" && value.trim()) return value
+      }
+      return ""
+    }
+    const source = string("sourcePath", "source_path")
+    const target = string("targetPath", "target_path")
+    if (source && target) return `${source} → ${target}`
+    const owner = string("owner")
+    const repo = string("repo", "repository")
+    const path = string("path", "file_path", "filePath", "file")
+    if (owner && repo) return `${owner}/${repo}${path ? "/" + path : ""}`
+    const pattern = string("pattern")
+    if (pattern && path) return `${pattern} in ${path}`
+    const query = string("query", "search_query")
+    if (query && path) return `${query} in ${path}`
+    const command = string("command")
+    if (command) return "$ " + command
+    const summary = string(
+      "url",
+      "uri",
+      "endpoint",
+      "task",
+      "question",
+      "query",
+      "search",
+      "search_query",
+      "q",
+      "pattern",
+      "glob",
+      "regex",
+      "expression",
+      "path",
+      "file_path",
+      "filePath",
+      "file",
+      "prompt",
+      "message",
+      "text",
+      "content",
+      "title",
+      "name",
+      "key",
+      "ref",
+      "branch",
+    )
+    if (summary) return summary
+  }
+  return ""
+}
+
 function visibleCalls(calls: Call[], limit: number, running: boolean): Call[] {
   if (calls.length <= limit) return calls
   const selected = new Set(
@@ -50,20 +116,35 @@ function visibleCalls(calls: Call[], limit: number, running: boolean): Call[] {
   return calls.filter((call) => selected.has(call))
 }
 
-function callTitle(call: Call, theme: Theme, context: RenderContext): string {
-  const icons = { ok: "›", error: "✗", running: "…", cancelled: "⊘" }
+function formatNestedCallLine(call: Call, theme: Theme, context: RenderContext): string {
+  const icons = { ok: "›", error: "✗", running: "◐", cancelled: "⊘" }
   const colors = { ok: "dim", error: "error", running: "warning", cancelled: "dim" } as const
-  const args = callArgs(call.args)
-  const known = ["read", "write", "edit", "bash", "powershell", "grep", "find", "ls"].includes(
-    call.name,
-  )
+  const parsed = parseCallArgsPreview(call.args)
+  const args =
+    parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {}
+  const hasString = (...keys: string[]) => keys.some((key) => typeof args[key] === "string")
+  const hasNonEmptyString = (...keys: string[]) =>
+    keys.some((key) => typeof args[key] === "string" && args[key].trim() !== "")
+  const specialized =
+    (["read", "write", "edit"].includes(call.name) &&
+      hasNonEmptyString("path", "file_path", "file")) ||
+    (call.name === "ls" &&
+      (hasString("path", "file_path", "file") ||
+        Object.keys(args).every((key) => key === "limit"))) ||
+    (["bash", "powershell"].includes(call.name) && hasNonEmptyString("command")) ||
+    (["grep", "find"].includes(call.name) && hasString("pattern"))
+  const summary = specialized
+    ? undefined
+    : truncateToWidth(singleLine(summarizeCallArgs(parsed)), 96, "…")
   let title = renderToolCallTitle(
     call.name,
     args,
     theme,
     { cwd: context.cwd, durationMs: call.durationMs },
     [],
-    !known && call.args ? theme.fg("muted", singleLine(call.args)) : undefined,
+    summary ? theme.fg("accent", summary) : summary,
   )
   if (typeof call.cost === "number" && Number.isFinite(call.cost))
     title += theme.fg(
@@ -195,7 +276,7 @@ class CodemodeCard implements Component {
       const shown = expanded ? calls : visibleCalls(calls, config.calls.collapsedCount, running)
       const selected = new Set(shown)
       for (const call of calls) {
-        const callRows = rows(callTitle(call, theme, context))
+        const callRows = rows(formatNestedCallLine(call, theme, context))
         if (selected.has(call)) output.push(...callRows)
         else hidden += callRows.length
         if (call.error) {

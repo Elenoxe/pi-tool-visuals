@@ -8,6 +8,7 @@ import {
   setKeybindings,
   stripTerminalSequences,
   type Component,
+  visibleWidth,
 } from "@earendil-works/pi-tui"
 
 import { getThemeByName } from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js"
@@ -154,14 +155,14 @@ test("running selection prioritizes active calls, then earliest calls in occurre
   const value = result(calls)
   const lines = draw(value)
   expect(lines).toContain("◆ Tools running · 10/12 calls")
-  expect(lines.filter((line) => /^[›…] read/.test(line))).toEqual([
+  expect(lines.filter((line) => /^[›◐] read/.test(line))).toEqual([
     ...calls.slice(0, 6).map((_, i) => `› read src/file-${i + 1}.ts · ${i + 1}ms`),
-    "… read src/file-11.ts · 11ms",
-    "… read src/file-12.ts · 12ms",
+    "◐ read src/file-11.ts · 11ms",
+    "◐ read src/file-12.ts · 12ms",
   ])
   for (const item of calls) item.status = "running"
-  expect(draw(value).filter((line) => line.startsWith("… read"))).toHaveLength(8)
-  expect(draw(value).find((line) => line.startsWith("… read"))).toBe("… read src/file-5.ts · 5ms")
+  expect(draw(value).filter((line) => line.startsWith("◐ read"))).toHaveLength(8)
+  expect(draw(value).find((line) => line.startsWith("◐ read"))).toBe("◐ read src/file-5.ts · 5ms")
   for (const item of calls) item.status = "ok"
   context.isPartial = false
   expect(draw(value)[0]).toBe("codemode · 1.2s")
@@ -184,6 +185,302 @@ test.each([
 ])("formats complete fields only: %s %s", (name, args, expected) => {
   expect(draw(result([{ id: "1", name, args, status: "ok" }]))[3]).toBe("› " + expected)
 })
+
+test.each([
+  ["read", { path: "src/a.ts", offset: 3, limit: 2 }, "read src/a.ts:3-4"],
+  ["write", { path: "src/a.ts" }, "write src/a.ts"],
+  ["edit", { file_path: "src/a.ts" }, "edit src/a.ts"],
+  ["bash", { command: "bun test" }, "bash $ bun test"],
+  ["powershell", { command: "Get-ChildItem" }, "powershell PS> Get-ChildItem"],
+  ["grep", { pattern: "TODO", path: "src", literal: true }, 'grep "TODO" in src'],
+  ["find", { pattern: "**/*.ts", path: "src" }, "find **/*.ts in src"],
+  ["ls", { path: "src" }, "ls src"],
+  ["ls", {}, "ls"],
+  ["ls", { limit: 10 }, "ls"],
+  ["grep", { pattern: "" }, "grep //"],
+  ["grep", { pattern: "", question: "ignored" }, "grep //"],
+  ["find", { pattern: "", path: "src", question: "ignored" }, "find  in src"],
+  ["ls", { path: "", question: "ignored" }, "ls"],
+  ["read", { path: "", file_path: "src/a.ts", question: "ignored" }, "read src/a.ts"],
+] as const)("preserves specialized titles for compatible %s arguments", (name, args, expected) => {
+  config.tools[name] = { enabled: false }
+  const value = result([{ ...call(1), name, args: JSON.stringify(args) }])
+  expect(draw(value)[3]).toBe("› " + expected + " · 1ms")
+})
+
+test.each([
+  ["read", { question: "Which file?" }, "Which file?"],
+  ["read", { path: "", question: "Which file?" }, "Which file?"],
+  ["read", { path: "   ", question: "Which file?" }, "Which file?"],
+  ["write", { file_path: "", task: "Generate configuration" }, "Generate configuration"],
+  ["edit", { file: "", question: "Which file?" }, "Which file?"],
+  ["bash", { command: "", question: "Which command?" }, "Which command?"],
+  ["bash", { command: " \t", question: "Which command?" }, "Which command?"],
+  ["powershell", { command: "", question: "Which command?" }, "Which command?"],
+  ["write", { task: "Generate configuration" }, "Generate configuration"],
+  ["edit", { sourcePath: "a.ts", targetPath: "b.ts" }, "a.ts → b.ts"],
+  ["bash", { url: "https://example.com/?q=a&b=2" }, "https://example.com/?q=a&b=2"],
+  ["powershell", { command: 12, query: "shiki" }, "shiki"],
+  ["grep", { pattern: false, query: "shiki", path: "src" }, "shiki in src"],
+  ["find", { glob: "**/*.ts" }, "**/*.ts"],
+  ["ls", { path: 42, question: "Which directory?" }, "Which directory?"],
+  ["ls", { question: "Which directory?" }, "Which directory?"],
+  ["ls", { filePath: "/tmp/config.ts" }, "/tmp/config.ts"],
+] as const)("uses generic summaries for incompatible %s arguments", (name, args, expected) => {
+  expect(draw(result([{ ...call(1), name, args: JSON.stringify(args) }]))[3]).toBe(
+    `› ${name} ${expected} · 1ms`,
+  )
+})
+
+test.each(["ffgrep", "fffind", "mcp__GitHub__fetch", "ask_user_question", "Read", "custom_read"])(
+  "uses arguments, not the tool name, to summarize %s",
+  (name) => {
+    const args = JSON.stringify({ pattern: "TODO", path: "src" })
+    expect(draw(result([{ ...call(1), name, args }]))[3]).toBe(`› ${name} TODO in src · 1ms`)
+  },
+)
+
+test.each([
+  [
+    {
+      sourcePath: "a.ts",
+      targetPath: "b.ts",
+      owner: "o",
+      repo: "r",
+      pattern: "p",
+      path: "src",
+      command: "c",
+    },
+    "a.ts → b.ts",
+  ],
+  [
+    { sourcePath: "a.ts", source_path: "ignored", targetPath: "b.ts", target_path: "ignored" },
+    "a.ts → b.ts",
+  ],
+  [{ source_path: "a.ts", target_path: "b.ts" }, "a.ts → b.ts"],
+  [
+    { owner: "Elenoxe", repo: "pi-sync", repository: "ignored", path: "src", pattern: "p" },
+    "Elenoxe/pi-sync/src",
+  ],
+  [{ owner: "Elenoxe", repository: "pi-sync" }, "Elenoxe/pi-sync"],
+  [{ owner: "Elenoxe", repo: "", repository: "pi-sync", file: "src" }, "Elenoxe/pi-sync/src"],
+  [{ pattern: "TODO", path: "src", query: "ignored", command: "ignored" }, "TODO in src"],
+  [{ query: "shiki", search_query: "ignored", file_path: "src" }, "shiki in src"],
+  [{ search_query: "shiki", filePath: "src" }, "shiki in src"],
+  [
+    { pattern: "TODO", path: "src", file_path: "ignored", filePath: "ignored", file: "ignored" },
+    "TODO in src",
+  ],
+  [{ pattern: "TODO", path: "", file_path: "src", filePath: "ignored" }, "TODO in src"],
+  [{ query: "shiki", path: null, filePath: "src", file: "ignored" }, "shiki in src"],
+  [{ pattern: "TODO", file: "src" }, "TODO in src"],
+  [
+    { sourcePath: 42, targetPath: "b.ts", pattern: "", path: "src", query: "shiki" },
+    "shiki in src",
+  ],
+  [{ owner: "", repo: "pi-sync", query: "shiki", path: "src" }, "shiki in src"],
+  [{ command: "bun test", url: "ignored" }, "$ bun test"],
+  [
+    { url: "https://example.com/api?q=a&sort=desc", question: "ignored" },
+    "https://example.com/api?q=a&sort=desc",
+  ],
+  [
+    { url: 42, uri: "", endpoint: "https://example.com/api", task: "ignored" },
+    "https://example.com/api",
+  ],
+  [{ task: "Review configuration", question: "ignored", query: "ignored" }, "Review configuration"],
+  [{ question: "Continue?", query: "ignored" }, "Continue?"],
+  [
+    {
+      query: "shiki",
+      search: "ignored",
+      search_query: "ignored",
+      q: "ignored",
+      pattern: "ignored",
+    },
+    "shiki",
+  ],
+  [{ search: "shiki", search_query: "ignored", q: "ignored" }, "shiki"],
+  [{ pattern: "**/*.ts", glob: "ignored", prompt: "ignored" }, "**/*.ts"],
+  [{ path: "src/config.ts", content: "ignored" }, "src/config.ts"],
+  [
+    { prompt: "Explain this function", message: "ignored", title: "ignored" },
+    "Explain this function",
+  ],
+  [{ title: "main", name: "ignored", key: "ignored", ref: "ignored", branch: "ignored" }, "main"],
+  [
+    {
+      command: " \t",
+      url: false,
+      task: [],
+      query: {},
+      pattern: null,
+      path: 42,
+      prompt: "",
+      title: "main",
+    },
+    "main",
+  ],
+] as const)("applies fixed combination, alias, and field priorities: %j", (args, expected) => {
+  expect(draw(result([{ ...call(1), name: "custom_tool", args: JSON.stringify(args) }]))[3]).toBe(
+    `› custom_tool ${expected} · 1ms`,
+  )
+})
+
+test.each([
+  "command",
+  "url",
+  "uri",
+  "endpoint",
+  "task",
+  "question",
+  "query",
+  "search",
+  "search_query",
+  "q",
+  "pattern",
+  "glob",
+  "regex",
+  "expression",
+  "path",
+  "file_path",
+  "filePath",
+  "file",
+  "prompt",
+  "message",
+  "text",
+  "content",
+  "title",
+  "name",
+  "key",
+  "ref",
+  "branch",
+])("supports the single-field alias %s", (key) => {
+  const args = JSON.stringify({ [key]: "value" })
+  expect(draw(result([{ ...call(1), name: "custom_tool", args }]))[3]).toBe(
+    `› custom_tool ${key === "command" ? "$ " : ""}value · 1ms`,
+  )
+})
+
+test.each(["input", "args", "arguments", "params", "payload"])(
+  "extracts one level from the %s wrapper",
+  (wrapper) => {
+    const args = JSON.stringify({ [wrapper]: { query: "shiki", path: "src" } })
+    expect(draw(result([{ ...call(1), name: "custom_tool", args }]))[3]).toBe(
+      "› custom_tool shiki in src · 1ms",
+    )
+  },
+)
+
+test.each([
+  [{ task: "top", input: { sourcePath: "a", targetPath: "b" } }, "top"],
+  [{ input: { question: "first" }, args: { question: "second" } }, "first"],
+  [{ input: [], args: { question: "second" } }, "second"],
+  [{ input: {}, args: { question: "second" } }, "second"],
+  [{ input: { input: { question: "too deep" } } }, ""],
+  [{ params: [{ query: "not an object" }] }, ""],
+  [{ unknown: "do not show JSON", count: 10, enabled: true }, ""],
+  [null, ""],
+  [42, ""],
+  ["text", ""],
+  [[{ query: "not an object" }], ""],
+] as const)("respects top-level priority and wrapper boundaries: %j", (args, expected) => {
+  expect(draw(result([{ ...call(1), name: "custom_tool", args: JSON.stringify(args) }]))[3]).toBe(
+    `› custom_tool${expected ? " " + expected : ""} · 1ms`,
+  )
+})
+
+test.each([
+  ['{"query":"shiki","path":"src"}', "shiki in src"],
+  ['{"query":"shiki","path":"src","content":"incomplete...', "shiki in src"],
+  ['{"query":"shiki","path":"src/partial...', "shiki"],
+  ['{"url":"https://example.com/?a=1,b=2","unused":"...', "https://example.com/?a=1,b=2"],
+  ['{"input":{"query":"shiki","path":"src"},"unused":"...', "shiki in src"],
+  ['{"input":{"query":"partial...', ""],
+  ['{"query":"partial...', ""],
+  ['{"note":"fake, \\"query\\": \\"evil\\"","query":"partial...', ""],
+  ["invalid JSON", ""],
+] as const)("summarizes only completely parsed preview fields: %s", (args, expected) => {
+  expect(draw(result([{ ...call(1), name: "custom_tool", args }]))[3]).toBe(
+    `› custom_tool${expected ? " " + expected : ""} · 1ms`,
+  )
+})
+
+test("uses fixed status glyphs with semantic colors and retains title, duration, and cost styling", () => {
+  context.isPartial = true
+  const foreground = spyOn(theme, "fg")
+  const statuses = ["ok", "running", "error", "cancelled"] as const
+  const name = "mcp__GitHub__fetch"
+  const args = JSON.stringify({ url: "https://example.com/?q=a&b=2" })
+  const lines = draw(
+    result(statuses.map((status, i) => ({ ...call(i + 1, status), name, args, cost: 0.02 }))),
+  )
+  for (const [index, icon] of ["›", "◐", "✗", "⊘"].entries())
+    expect(lines).toContain(`${icon} ${name} https://example.com/?q=a&b=2 · ${index + 1}ms · $0.02`)
+  for (const [color, icon] of [
+    ["dim", "›"],
+    ["warning", "◐"],
+    ["error", "✗"],
+    ["dim", "⊘"],
+  ])
+    expect(foreground).toHaveBeenCalledWith(color, icon)
+  expect(foreground).toHaveBeenCalledWith("toolTitle", theme.bold(name))
+  expect(foreground).toHaveBeenCalledWith("accent", "https://example.com/?q=a&b=2")
+})
+
+test.each([
+  ["x".repeat(120), "x".repeat(95) + "…"],
+  ["中".repeat(60), "中".repeat(47) + "…"],
+  ["e\u0301".repeat(120), "e\u0301".repeat(95) + "…"],
+])(
+  "caps generic summaries by terminal columns without changing recorded arguments",
+  (text, expected) => {
+    const value = result([{ ...call(1), name: "custom_tool", args: JSON.stringify({ text }) }])
+    const original = structuredClone(value)
+    expect(draw(value)[3]).toBe(`› custom_tool ${expected} · 1ms`)
+    expect(visibleWidth(expected)).toBeLessThanOrEqual(96)
+    const narrow = draw(value, 24)
+    expect(narrow.every((line) => visibleWidth(line) <= 24)).toBe(true)
+    expect(value).toEqual(original)
+  },
+)
+
+test("sanitizes multiline text and control sequences before displaying a generic summary", () => {
+  const args = JSON.stringify({ question: "第一行\r\n第二行\t\u001b[31m\u0007" })
+  expect(draw(result([{ ...call(1), name: "ask_user_question", args }]))[3]).toBe(
+    "› ask_user_question 第一行␊第二行    ␛[31m␇ · 1ms",
+  )
+})
+
+test("does not apply the generic summary cap to specialized native titles", () => {
+  const command = "x".repeat(110)
+  const args = JSON.stringify({ command })
+  expect(draw(result([{ ...call(1), name: "bash", args }]))[3]).toBe(`› bash $ ${command} · 1ms`)
+})
+
+test.each([false, true])(
+  "restores generic titles and folding from serialized history, expanded: %s",
+  (expanded) => {
+    context.expanded = expanded
+    config.codemode.calls.collapsedCount = 1
+    const calls = [
+      { ...call(1), name: "ffgrep", args: '{"pattern":"TODO","path":"src"}' },
+      { ...call(2), name: "ask_user_question", args: '{"question":"Continue?"}' },
+      {
+        ...call(3),
+        name: "custom_tool",
+        args: '{"input":{"query":"shiki","path":"src"},"text":"partial...',
+      },
+    ]
+    const value = result(calls)
+    const expected = draw(value, 40)
+    context = { ...context, state: {}, args: JSON.parse(JSON.stringify(context.args)) }
+    callComponent = resultComponent = undefined
+    renderer = createCodemodeRenderer(() => config)
+    expect(draw(JSON.parse(JSON.stringify(value)), 40)).toEqual(expected)
+    expect(expected.join("\n").includes("lines hidden")).toBe(!expanded)
+  },
+)
 
 test("renders Completed and folds final output by wrapped terminal rows", () => {
   expect(draw(result())).toEqual(["codemode · 1.2s", "", "✓ Completed"])
@@ -328,7 +625,7 @@ test("uses error statistics for failed calls even while other calls are still ru
   expect(lines).toContain("✗ Tools running · 1/2 calls · 1 failed")
 })
 
-test("keeps unknown tool arguments before timing, costs including zero, and paths without output", () => {
+test("omits unmatched tool arguments but keeps timing, zero cost, and paths without output", () => {
   const value = result([
     {
       id: "model",
@@ -339,7 +636,7 @@ test("keeps unknown tool arguments before timing, costs including zero, and path
       cost: 0,
     },
   ])
-  expect(draw(value)).toContain('› models.classify {"provider":"demo"} · 32ms · $0.0')
+  expect(draw(value)).toContain("› models.classify · 32ms · $0.0")
   value.details = { calls: [], fullOutputPath: "/tmp/codemode-empty.txt" }
   expect(draw(value)).toContain("Full output: /tmp/codemode-empty.txt")
 })
