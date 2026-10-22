@@ -6,6 +6,7 @@ export const HIGHLIGHT_LIMITS = {
   documentCharacters: 8_000_000,
   syncLines: 96,
   syncCharacters: 16_000,
+  syncLineCharacters: 2_000,
   sliceLines: 96,
   sliceCharacters: 16_000,
   maxLineLength: 16_000,

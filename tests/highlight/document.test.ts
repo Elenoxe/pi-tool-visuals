@@ -19,6 +19,7 @@ import {
 import { ansiLines } from "../../src/highlight/engine.ts"
 import { documentCacheStats } from "../../src/highlight/document.ts"
 import { ansiCache, HIGHLIGHT_LIMITS } from "../../src/highlight/cache.ts"
+import { HighlightScheduler } from "../../src/highlight/scheduler.ts"
 
 const createHighlighter = shiki.createHighlighter
 let theme: Theme
@@ -288,13 +289,73 @@ test("small streaming updates immediately highlight the tail without reprocessin
   expect(documentCacheStats().subscribers).toBe(0)
 })
 
+test("unchanged redraws and expansion reuse cached lines without advancing or restarting queued work", async () => {
+  await shortReady()
+  const source = Array.from({ length: 1000 }, (_, i) => `const n${i} = ${i}`).join("\n")
+  const old = mock(() => {})
+  const redraw = mock(() => {})
+  const initial = highlightDocument(options(source, { to: 300, invalidate: old }))!
+  expect(initial.filter((line) => line !== null)).toHaveLength(HIGHLIGHT_LIMITS.syncLines)
+  const count = tokens.mock.calls.length
+  const schedule = spyOn(HighlightScheduler.prototype, "schedule")
+  const cancel = spyOn(HighlightScheduler.prototype, "cancel")
+  for (let i = 0; i < 10; i++)
+    expect(highlightDocument(options(source, { to: 300, invalidate: redraw }))).toEqual(initial)
+  expect(tokens).toHaveBeenCalledTimes(count)
+  expect(schedule).not.toHaveBeenCalled()
+  expect(cancel).not.toHaveBeenCalled()
+  const expanded = highlightDocument(options(source, { invalidate: redraw }))!
+  expect(expanded.slice(0, initial.length)).toEqual(initial)
+  expect(expanded.slice(initial.length).every((line) => line === null)).toBe(true)
+  expect(tokens).toHaveBeenCalledTimes(count)
+  expect(cancel).not.toHaveBeenCalled()
+  expect(documentCacheStats().tasks).toBe(1)
+  await until(() => redraw.mock.calls.length > 0)
+  expect(tokens.mock.calls.flatMap(([code]) => code.split("\n"))).toEqual(source.split("\n"))
+  expect(highlightDocument(options(source))!.every((line) => line !== null)).toBe(true)
+  expect(old).not.toHaveBeenCalled()
+  expect(redraw).toHaveBeenCalledTimes(1)
+})
+
+test("short tails highlight synchronously but growing long tails defer and discard obsolete work", async () => {
+  await shortReady()
+  const prefix = "const first = 1\n"
+  const start = 'const payload = "'
+  let source = prefix + start + "x".repeat(HIGHLIGHT_LIMITS.syncLineCharacters - start.length)
+  const initial = highlightDocument(options(source, { streaming: true }))!
+  expect(initial.every((line) => line !== null)).toBe(true)
+  const old = mock(() => {})
+  const redraw = mock(() => {})
+  tokens.mockClear()
+  for (const suffix of ["x", "y", 'z"']) {
+    source += suffix
+    const current = highlightDocument(
+      options(source, {
+        streaming: true,
+        invalidate: suffix === 'z"' ? redraw : old,
+      }),
+    )!
+    expect(current).toEqual([initial[0]!, null])
+    expect(tokens).not.toHaveBeenCalled()
+    expect(documentCacheStats().tasks).toBe(1)
+  }
+  await until(() => redraw.mock.calls.length > 0)
+  expect(tokens).toHaveBeenCalledTimes(1)
+  expect(tokens.mock.calls[0]![0]).toBe(source.slice(prefix.length))
+  const result = highlightDocument(options(source))
+  const expected = instance.codeToTokens(source, { lang: "typescript", theme: "dark-plus" })
+  expect(result).toEqual(ansiLines(expected.tokens, theme, expected.fg))
+  expect(old).not.toHaveBeenCalled()
+  expect(redraw).toHaveBeenCalledTimes(1)
+})
+
 test.each([
   [
     "lines",
     Array.from({ length: 240 }, (_, i) => `const n${i} = ${i}`),
     HIGHLIGHT_LIMITS.syncLines,
   ],
-  ["characters", Array.from({ length: 4 }, (_, i) => "//" + String(i).repeat(9000)), 1],
+  ["characters", Array.from({ length: 10 }, (_, i) => "//" + String(i).repeat(1998)), 7],
 ] as const)(
   "synchronously fills the %s budget and schedules only the remaining lines",
   async (_name, lines, completed) => {

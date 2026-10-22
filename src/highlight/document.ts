@@ -254,8 +254,11 @@ export function highlightDocument(
   onEvict?: () => void,
 ): (string | null)[] | null {
   const identity = resolveIdentity(options.language, options.theme)
-  cancelHighlightRequest(options.subscriberId)
+  scheduler.cancelNotification(options.subscriberId)
+  if (subscriberDocuments.get(options.subscriberId)?.id !== options.id)
+    cancelHighlightRequest(options.subscriberId)
   if (!identity || engineFailure(identity)) {
+    cancelHighlightRequest(options.subscriberId)
     releaseHighlightDocument(options.id)
     return null
   }
@@ -267,15 +270,18 @@ export function highlightDocument(
     options.from < 0 ||
     options.to < options.from
   ) {
+    cancelHighlightRequest(options.subscriberId)
     options.onError(new Error("Invalid highlight document identity or half-open line range"))
     return null
   }
   if (options.source.length * 2 + options.id.length > HIGHLIGHT_LIMITS.documentCharacters) {
+    cancelHighlightRequest(options.subscriberId)
     releaseHighlightDocument(options.id)
     options.onError(new Error(`Highlight document source exceeds character budget (${options.id})`))
     return null
   }
   let doc = documents.get(options.id)
+  const changed = !doc || doc.source !== options.source || doc.identity.key !== identity.key
   if (!doc) {
     const created = new Document(options.id, options.source, identity, options.theme, () => {
       if (documents.peek(created.id) === created) enqueue(created)
@@ -311,25 +317,27 @@ export function highlightDocument(
   if (doc.failed) return null
   const from = Math.min(options.from, doc.lines.length)
   const to = Math.min(options.to, doc.lines.length)
+  const previous = doc.requests.get(options.subscriberId)
+  const priority = options.priority ?? "visible"
   if (to > from && to > doc.completed) {
     doc.requests.set(options.subscriberId, {
       to,
-      priority: options.priority ?? "visible",
+      priority,
       invalidate: options.invalidate,
       onError: options.onError,
     })
     subscriberDocuments.set(options.subscriberId, doc)
-    scheduler.cancel(doc.id)
     const generation = doc.generation
     let syncTo = doc.completed
     let characters = 0
     while (
+      changed &&
       options.priority !== "background" &&
       syncTo < to &&
       syncTo - doc.completed < HIGHLIGHT_LIMITS.syncLines
     ) {
       const line = doc.lines[syncTo]!
-      if (line.length >= HIGHLIGHT_LIMITS.maxLineLength) break
+      if (line.length > HIGHLIGHT_LIMITS.syncLineCharacters) break
       const length = line.length + (syncTo > doc.completed ? 1 : 0)
       if (characters + length > HIGHLIGHT_LIMITS.syncCharacters) break
       characters += length
@@ -341,9 +349,13 @@ export function highlightDocument(
     }
     if (valid(doc, generation)) {
       finishRequests(doc, options.subscriberId)
-      enqueue(doc)
+      if (changed || previous?.to !== to || previous.priority !== priority) enqueue(doc)
     }
     if (doc.failed) return null
+  } else if (previous) {
+    doc.requests.delete(options.subscriberId)
+    subscriberDocuments.delete(options.subscriberId)
+    enqueue(doc)
   }
   return Array.from({ length: to - from }, (_, index) => doc!.ansi[from + index] ?? null)
 }
