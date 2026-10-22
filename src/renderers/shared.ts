@@ -99,7 +99,9 @@ export function renderToolCallTitle(
   }
   const path = getString("path") || getString("file_path") || getString("file")
   let body = ""
-  if (["read", "write", "edit", "ls"].includes(name)) {
+  if (bodyOverride !== undefined) {
+    body = bodyOverride
+  } else if (["read", "write", "edit", "ls"].includes(name)) {
     body = path ? renderPath(path, context.cwd, theme, name !== "ls") : ""
     if (name === "read" && ((args.offset != null && args.offset !== 1) || args.limit != null)) {
       const start =
@@ -138,7 +140,6 @@ export function renderToolCallTitle(
   if (typeof context.durationMs === "number" && Number.isFinite(context.durationMs))
     values.push(formatDuration(context.durationMs))
   const suffix = values.length ? theme.fg("dim", ` · ${values.join(" · ")}`) : ""
-  body = bodyOverride ?? body
   return `${theme.fg("toolTitle", theme.bold(singleLine(name)))}${body ? ` ${body}` : ""}${suffix}`
 }
 

@@ -3,6 +3,8 @@ import { stripVTControlCharacters } from "node:util"
 
 import type { CodemodeToolDetails, ToolRenderers } from "@earendil-works/pi-coding-agent"
 import {
+  getCapabilities,
+  setCapabilities,
   getKeybindings,
   KeybindingsManager,
   setKeybindings,
@@ -405,6 +407,143 @@ test.each([
     `› custom_tool${expected ? " " + expected : ""} · 1ms`,
   )
 })
+
+// Keep the interesting suffix short while matching Pi's 200-code-unit preview boundary.
+function truncatedPreview(prefix: string): string {
+  const start = '{"unused":"'
+  const tail = '",' + prefix.slice(1)
+  return start + "x".repeat(200 - start.length - tail.length) + tail + "..."
+}
+
+test.each([
+  ['{"url":"https://example.com/long', "https://example.com/long…"],
+  ['{"command":"bun run long', "$ bun run long…"],
+  ['{"path":"src/long', "src/long…"],
+  ['{"query":"search keywords', "search keywords…"],
+  ['{"text":"Explain this function', "Explain this function…"],
+  ['{"query":"shiki","path":"src/long', "shiki in src/long…"],
+  ['{"pattern":"TODO","path":"src/long', "TODO in src/long…"],
+  ['{"path":"src","pattern":"TO', "TO… in src"],
+  ['{"sourcePath":"a.ts","targetPath":"long', "a.ts → long…"],
+  ['{"owner":"Elenoxe","repo":"pi-sync","path":"src/long', "Elenoxe/pi-sync/src/long…"],
+  ['{"question":"Continue?","command":"bun run long', "$ bun run long…"],
+  ['{"path":"src/a.ts","content":"long', "src/a.ts"],
+  ['{"query":"shiki","path":', "shiki"],
+  ['{"query":"shiki","path":"', "shiki"],
+  ['{"question":"Continue?","unknown":"long', "Continue?"],
+  ['{"unknown":"long', ""],
+  ['{"other":{"query":"long', ""],
+  ['{"input":{"input":{"query":"long', ""],
+  ['{"input":[{"query":"long', ""],
+  ['{"query":["long', ""],
+  ['{"query":123', ""],
+  ['{"query":tru', ""],
+  ['{"query', ""],
+  ['{"query":"__pi_truncated_value__', "__pi_truncated_value__…"],
+] as const)(
+  "recovers only eligible truncated values with existing priorities: %s",
+  (prefix, expected) => {
+    const args = truncatedPreview(prefix)
+    expect(draw(result([{ ...call(1), name: "custom_tool", args }]))[3]).toBe(
+      `› custom_tool${expected ? " " + expected : ""} · 1ms`,
+    )
+  },
+)
+
+test.each(["input", "args", "arguments", "params", "payload"])(
+  "recovers truncated strings in the %s wrapper",
+  (wrapper) => {
+    const args = truncatedPreview(`{"${wrapper}":{"query":"shiki","path":"src/long`)
+    expect(draw(result([{ ...call(1), name: "custom_tool", args }]))[3]).toBe(
+      "› custom_tool shiki in src/long… · 1ms",
+    )
+  },
+)
+
+test.each([
+  ["read", '{"path":"src/long', "src/long…"],
+  ["write", '{"path":"src/long', "src/long…"],
+  ["edit", '{"path":"src/long', "src/long…"],
+  ["ls", '{"path":"src/long', "src/long…"],
+  ["bash", '{"command":"bun run long', "$ bun run long…"],
+  ["powershell", '{"command":"Get-Long', "PS> Get-Long…"],
+  ["grep", '{"pattern":"TODO","path":"src/long', "TODO in src/long…"],
+  ["grep", '{"path":"src","pattern":"TO', "TO… in src"],
+  ["find", '{"path":"src","pattern":"**/*.t', "**/*.t… in src"],
+  ["read", '{"path":"src/a.ts","content":"long', "src/a.ts"],
+  ["read", '{"path":"src/a.ts","file":"ignored', "src/a.ts"],
+] as const)(
+  "handles native %s titles without treating partial values as complete",
+  (name, prefix, expected) => {
+    const args = truncatedPreview(prefix)
+    expect(draw(result([{ ...call(1), name, args }]))[3]).toBe(`› ${name} ${expected} · 1ms`)
+  },
+)
+
+test("never links a recovered path, but still links complete native paths", () => {
+  const capabilities = getCapabilities()
+  setCapabilities({ ...capabilities, hyperlinks: true })
+  try {
+    const partial = result([{ ...call(1), args: truncatedPreview('{"path":"src/long') }])
+    draw(partial)
+    expect(resultComponent!.render(160).join("\n")).not.toContain("file://")
+    draw(result([call(1)]))
+    expect(resultComponent!.render(160).join("\n")).toContain("file://")
+  } finally {
+    setCapabilities(capabilities)
+  }
+})
+
+test("requires the exact native truncation length and suffix", () => {
+  const args = truncatedPreview('{"query":"partial')
+  for (const invalid of [args.slice(1), " " + args, args.slice(0, -3), args.slice(0, -3) + "…"]) {
+    expect(draw(result([{ ...call(1), name: "custom_tool", args: invalid }]))[3]).toBe(
+      "› custom_tool · 1ms",
+    )
+  }
+})
+
+test("decodes escaped quotes, commas and backslashes, but rejects incomplete escapes", () => {
+  const text = 'a, "quoted" \\path'
+  const args = truncatedPreview('{"text":' + JSON.stringify(text).slice(0, -1))
+  expect(draw(result([{ ...call(1), name: "custom_tool", args }]))[3]).toBe(
+    `› custom_tool ${text}… · 1ms`,
+  )
+  for (const escape of ["\\", "\\u", "\\u1", "\\u12", "\\u123"]) {
+    const args = truncatedPreview('{"query":"shiki","path":"partial' + escape)
+    expect(draw(result([{ ...call(1), name: "custom_tool", args }]))[3]).toBe(
+      "› custom_tool shiki · 1ms",
+    )
+  }
+})
+
+test.each(["url", "command", "path", "query", "text"])(
+  "recovers actual long %s previews",
+  (key) => {
+    const json = JSON.stringify({ [key]: "x".repeat(240) })
+    const args = json.slice(0, 200) + "..."
+    const expected = (key === "command" ? "$ " : "") + "x".repeat(key === "command" ? 93 : 95) + "…"
+    expect(draw(result([{ ...call(1), name: "custom_tool", args }]))[3]).toBe(
+      `› custom_tool ${expected} · 1ms`,
+    )
+  },
+)
+
+test.each([false, true])(
+  "rehydrates truncated titles without changing history, expanded: %s",
+  (expanded) => {
+    context.expanded = expanded
+    const args = truncatedPreview('{"input":{"query":"shiki","path":"src/long')
+    const value = result([{ ...call(1), name: "custom_tool", args }])
+    const original = structuredClone(value)
+    const expected = draw(value)
+    context = { ...context, state: {} }
+    callComponent = resultComponent = undefined
+    renderer = createCodemodeRenderer(() => config)
+    expect(draw(JSON.parse(JSON.stringify(value)))).toEqual(expected)
+    expect(value).toEqual(original)
+  },
+)
 
 test("uses fixed status glyphs with semantic colors and retains title, duration, and cost styling", () => {
   context.isPartial = true

@@ -19,42 +19,114 @@ import {
 type Call = CodemodeToolDetails["calls"][number]
 type State = { hasResult?: boolean }
 
-/** Recover only complete top-level fields; never guess the end of a truncated value. */
-function parseCallArgsPreview(summary: string): unknown {
+const ARG_WRAPPERS = ["input", "args", "arguments", "params", "payload"] as const
+const SUMMARY_FIELDS = [
+  "url",
+  "uri",
+  "endpoint",
+  "task",
+  "question",
+  "query",
+  "search",
+  "search_query",
+  "q",
+  "pattern",
+  "glob",
+  "regex",
+  "expression",
+  "path",
+  "file_path",
+  "filePath",
+  "file",
+  "prompt",
+  "message",
+  "text",
+  "content",
+  "title",
+  "name",
+  "key",
+  "ref",
+  "branch",
+]
+const COMBINATION_FIELDS = [
+  "command",
+  "sourcePath",
+  "source_path",
+  "targetPath",
+  "target_path",
+  "owner",
+  "repo",
+  "repository",
+]
+
+type ParsedCallArgsPreview = {
+  args: Record<string, unknown>
+  truncated?: { key: string; wrapper?: string }
+}
+
+function isArgs(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value)
+}
+
+function parseCallArgsPreview(summary: string): ParsedCallArgsPreview {
   try {
-    return JSON.parse(summary)
+    const args: unknown = JSON.parse(summary)
+    return { args: isArgs(args) ? args : {} }
   } catch {
     const prefix = summary.endsWith("...") ? summary.slice(0, -3) : summary
+    // Pi stores the first 200 UTF-16 code units followed by three dots.
+    if (prefix.length === 200 && summary.endsWith("...")) {
+      // Longer than the preview, so even escaped input cannot contain this marker.
+      const marker = "_".repeat(prefix.length + 1)
+      for (const closing of ["}", "}}"]) {
+        try {
+          const args: unknown = JSON.parse(prefix + marker + '"' + closing)
+          if (!isArgs(args)) continue
+          for (const wrapper of [undefined, ...ARG_WRAPPERS]) {
+            const candidate = wrapper === undefined ? args : args[wrapper]
+            if (!isArgs(candidate)) continue
+            const last = Object.entries(candidate).at(-1)
+            if (!last) continue
+            const [key, value] = last
+            if (
+              typeof value !== "string" ||
+              !value.endsWith(marker) ||
+              !value.slice(0, -marker.length).trim() ||
+              ![...SUMMARY_FIELDS, ...COMBINATION_FIELDS].includes(key)
+            )
+              continue
+            candidate[key] = value.slice(0, -marker.length)
+            return { args, truncated: { key, wrapper } }
+          }
+        } catch {
+          // Incomplete escapes, keys, arrays and deeper objects cannot be closed this way.
+        }
+      }
+    }
     const ends = Array.from(prefix.matchAll(/,/g), (match) => match.index).reverse()
     if (/["}\]]\s*$/.test(prefix)) ends.unshift(prefix.length)
     for (const end of ends) {
       try {
-        return JSON.parse(prefix.slice(0, end) + "}")
+        const args: unknown = JSON.parse(prefix.slice(0, end) + "}")
+        if (isArgs(args)) return { args }
       } catch {
         // A comma inside a string or nested value is not a top-level field boundary.
       }
     }
-    return undefined
+    return { args: {} }
   }
 }
 
-function summarizeCallArgs(rawArgs: unknown): string {
-  if (!rawArgs || typeof rawArgs !== "object" || Array.isArray(rawArgs)) return ""
-  const outer = rawArgs as Record<string, unknown>
-  for (const candidate of [
-    outer,
-    outer.input,
-    outer.args,
-    outer.arguments,
-    outer.params,
-    outer.payload,
-  ]) {
-    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue
-    const args = candidate as Record<string, unknown>
+function summarizeCallArgs({ args: outer, truncated }: ParsedCallArgsPreview): string {
+  for (const wrapper of [undefined, ...ARG_WRAPPERS]) {
+    const candidate = wrapper === undefined ? outer : outer[wrapper]
+    if (!isArgs(candidate)) continue
+    const args = candidate
     const string = (...keys: string[]) => {
       for (const key of keys) {
         const value = args[key]
-        if (typeof value === "string" && value.trim()) return value
+        if (typeof value === "string" && value.trim())
+          return value + (truncated?.key === key && truncated.wrapper === wrapper ? "…" : "")
       }
       return ""
     }
@@ -71,34 +143,7 @@ function summarizeCallArgs(rawArgs: unknown): string {
     if (query && path) return `${query} in ${path}`
     const command = string("command")
     if (command) return "$ " + command
-    const summary = string(
-      "url",
-      "uri",
-      "endpoint",
-      "task",
-      "question",
-      "query",
-      "search",
-      "search_query",
-      "q",
-      "pattern",
-      "glob",
-      "regex",
-      "expression",
-      "path",
-      "file_path",
-      "filePath",
-      "file",
-      "prompt",
-      "message",
-      "text",
-      "content",
-      "title",
-      "name",
-      "key",
-      "ref",
-      "branch",
-    )
+    const summary = string(...SUMMARY_FIELDS)
     if (summary) return summary
   }
   return ""
@@ -120,10 +165,7 @@ function formatNestedCallLine(call: Call, theme: Theme, context: RenderContext):
   const icons = { ok: "›", error: "✗", running: "◐", cancelled: "⊘" }
   const colors = { ok: "dim", error: "error", running: "warning", cancelled: "dim" } as const
   const parsed = parseCallArgsPreview(call.args)
-  const args =
-    parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : {}
+  const args = parsed.args
   const hasString = (...keys: string[]) => keys.some((key) => typeof args[key] === "string")
   const hasNonEmptyString = (...keys: string[]) =>
     keys.some((key) => typeof args[key] === "string" && args[key].trim() !== "")
@@ -135,9 +177,21 @@ function formatNestedCallLine(call: Call, theme: Theme, context: RenderContext):
         Object.keys(args).every((key) => key === "limit"))) ||
     (["bash", "powershell"].includes(call.name) && hasNonEmptyString("command")) ||
     (["grep", "find"].includes(call.name) && hasString("pattern"))
-  const summary = specialized
-    ? undefined
-    : truncateToWidth(singleLine(summarizeCallArgs(parsed)), 96, "…")
+  const pathKey = ["path", "file_path", "file"].find(
+    (key) => typeof args[key] === "string" && args[key],
+  )
+  const truncatedKey = parsed.truncated?.wrapper === undefined ? parsed.truncated?.key : undefined
+  const truncatedSpecialized =
+    specialized &&
+    truncatedKey !== undefined &&
+    ((["read", "write", "edit", "ls"].includes(call.name) && truncatedKey === pathKey) ||
+      (["bash", "powershell"].includes(call.name) && truncatedKey === "command") ||
+      (["grep", "find"].includes(call.name) &&
+        (truncatedKey === "pattern" || truncatedKey === pathKey)))
+  let summary = specialized && !truncatedSpecialized ? undefined : summarizeCallArgs(parsed)
+  if (truncatedSpecialized && ["bash", "powershell"].includes(call.name))
+    summary = (call.name === "powershell" ? "PS> " : "$ ") + args.command + "…"
+  if (summary !== undefined) summary = truncateToWidth(singleLine(summary), 96, "…")
   let title = renderToolCallTitle(
     call.name,
     args,
