@@ -74,8 +74,8 @@ function parseCallArgsPreview(summary: string): ParsedCallArgsPreview {
     return { args: isArgs(args) ? args : {} }
   } catch {
     const prefix = summary.endsWith("...") ? summary.slice(0, -3) : summary
-    // Pi stores the first 200 UTF-16 code units followed by three dots.
-    if (prefix.length === 200 && summary.endsWith("...")) {
+    // Pi caps the entire preview at 200 UTF-16 code units, including the three dots.
+    if (summary.length === 200 && summary.endsWith("...")) {
       // Longer than the preview, so even escaped input cannot contain this marker.
       const marker = "_".repeat(prefix.length + 1)
       for (const closing of ["}", "}}"]) {

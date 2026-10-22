@@ -412,7 +412,7 @@ test.each([
 function truncatedPreview(prefix: string): string {
   const start = '{"unused":"'
   const tail = '",' + prefix.slice(1)
-  return start + "x".repeat(200 - start.length - tail.length) + tail + "..."
+  return start + "x".repeat(197 - start.length - tail.length) + tail + "..."
 }
 
 test.each([
@@ -521,13 +521,23 @@ test.each(["url", "command", "path", "query", "text"])(
   "recovers actual long %s previews",
   (key) => {
     const json = JSON.stringify({ [key]: "x".repeat(240) })
-    const args = json.slice(0, 200) + "..."
+    const args = json.slice(0, 197) + "..."
     const expected = (key === "command" ? "$ " : "") + "x".repeat(key === "command" ? 93 : 95) + "…"
     expect(draw(result([{ ...call(1), name: "custom_tool", args }]))[3]).toBe(
       `› custom_tool ${expected} · 1ms`,
     )
   },
 )
+
+test("shows a long bash command from a native 200-character preview", () => {
+  const command =
+    `bun -e 'import {loadToolVisualsConfig} from "./src/config.ts"; ` + "x".repeat(240)
+  const args = JSON.stringify({ command, timeout: 20 }).slice(0, 197) + "..."
+  expect(args).toHaveLength(200)
+  expect(draw(result([{ ...call(1), name: "bash", args }]))[3]).toBe(
+    `› bash $ ${command.slice(0, 93)}… · 1ms`,
+  )
+})
 
 test.each([false, true])(
   "rehydrates truncated titles without changing history, expanded: %s",
