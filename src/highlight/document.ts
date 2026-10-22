@@ -98,12 +98,12 @@ function valid(doc: Document, generation: number): boolean {
   return documents.peek(doc.id) === doc && doc.generation === generation && !doc.failed
 }
 
-function finishRequests(doc: Document): void {
+function finishRequests(doc: Document, synchronousSubscriber?: string): void {
   for (const [id, request] of doc.requests) {
     if (request.to > doc.completed) continue
     doc.requests.delete(id)
     subscriberDocuments.delete(id)
-    if (request.invalidate) {
+    if (request.invalidate && id !== synchronousSubscriber) {
       const generation = doc.generation
       scheduler.notify(id, {
         scope: doc.id,
@@ -133,13 +133,20 @@ function enqueue(doc: Document): void {
     return
   }
   const next = target(doc)
-  if (!next || doc.failed || documents.peek(doc.id) !== doc) return
+  if (!next || doc.failed || documents.peek(doc.id) !== doc) {
+    scheduler.cancel(doc.id)
+    return
+  }
   const generation = doc.generation
   scheduler.schedule(
     {
       id: doc.id,
       valid: () => valid(doc, generation),
-      run: () => processSlice(doc, next.to),
+      run: () => {
+        if (!processSlice(doc, next.to)) return
+        finishRequests(doc)
+        enqueue(doc)
+      },
     },
     next.priority,
   )
@@ -159,20 +166,18 @@ function commitSlice(doc: Document): void {
     return
   }
   documents.set(doc.id, doc, doc.characters)
-  finishRequests(doc)
-  enqueue(doc)
 }
 
-function processSlice(doc: Document, to: number): void {
+function processSlice(doc: Document, to: number): boolean {
   if (!themeMatches(doc)) {
     invalidateDocument(doc)
-    return
+    return false
   }
   const generation = doc.generation
   const failure = engineFailure(doc.identity)
   if (failure) {
     fail(doc, failure)
-    return
+    return false
   }
   const highlighter = readyEngine(doc.identity, {
     invalidate: doc.onReady,
@@ -182,7 +187,7 @@ function processSlice(doc: Document, to: number): void {
       else fail(doc, error)
     },
   })
-  if (!highlighter) return
+  if (!highlighter) return false
   try {
     if (doc.completed === doc.lines.length - 1) doc.tailStart = doc.grammarState
     const line = doc.lines[doc.completed]!
@@ -200,7 +205,7 @@ function processSlice(doc: Document, to: number): void {
         doc.completed++
       }
       commitSlice(doc)
-      return
+      return valid(doc, generation)
     }
     let end = doc.completed
     let characters = 0
@@ -214,7 +219,7 @@ function processSlice(doc: Document, to: number): void {
       characters += length
       end++
     }
-    if (end === doc.completed) return
+    if (end === doc.completed) return false
     const result = tokenizeSlice(
       highlighter,
       doc.lines.slice(doc.completed, end).join("\n"),
@@ -223,12 +228,13 @@ function processSlice(doc: Document, to: number): void {
       doc.grammarState,
     )
     if (!themeMatches(doc) && doc.generation === generation) invalidateDocument(doc)
-    if (!valid(doc, generation)) return
+    if (!valid(doc, generation)) return false
     doc.ansi.push(...result.lines)
     doc.ansiCharacters += result.lines.reduce((sum, line) => sum + line.length, 0)
     doc.completed = end
     doc.grammarState = result.grammarState
     commitSlice(doc)
+    return valid(doc, generation)
   } catch (cause) {
     if (valid(doc, generation))
       fail(
@@ -238,10 +244,11 @@ function processSlice(doc: Document, to: number): void {
           { cause },
         ),
       )
+    return false
   }
 }
 
-/** Nonblocking range lookup; null entries mean render the original source line. */
+/** Bounded synchronous range lookup; unfinished entries continue on the scheduler. */
 export function highlightDocument(
   options: HighlightDocumentOptions,
   onEvict?: () => void,
@@ -312,7 +319,31 @@ export function highlightDocument(
       onError: options.onError,
     })
     subscriberDocuments.set(options.subscriberId, doc)
-    enqueue(doc)
+    scheduler.cancel(doc.id)
+    const generation = doc.generation
+    let syncTo = doc.completed
+    let characters = 0
+    while (
+      options.priority !== "background" &&
+      syncTo < to &&
+      syncTo - doc.completed < HIGHLIGHT_LIMITS.syncLines
+    ) {
+      const line = doc.lines[syncTo]!
+      if (line.length >= HIGHLIGHT_LIMITS.maxLineLength) break
+      const length = line.length + (syncTo > doc.completed ? 1 : 0)
+      if (characters + length > HIGHLIGHT_LIMITS.syncCharacters) break
+      characters += length
+      syncTo++
+    }
+    // Isolating the unstable tail may require a second slice within the same total budget.
+    while (doc.completed < syncTo && processSlice(doc, syncTo)) {
+      if (!valid(doc, generation)) break
+    }
+    if (valid(doc, generation)) {
+      finishRequests(doc, options.subscriberId)
+      enqueue(doc)
+    }
+    if (doc.failed) return null
   }
   return Array.from({ length: to - from }, (_, index) => doc!.ansi[from + index] ?? null)
 }

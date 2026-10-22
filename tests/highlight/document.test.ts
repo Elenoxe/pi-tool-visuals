@@ -192,14 +192,14 @@ test("stable subscriber identity keeps only its latest callback and cancellation
   const old = mock(() => {})
   const latest = mock(() => {})
   const source = "let n = 1\n".repeat(1000)
-  const req = options(source, { to: 20 })
+  const req = options(source, { to: 300 })
   highlightDocument({ ...req, invalidate: old })
   highlightDocument({ ...req, invalidate: latest })
   await until(() => latest.mock.calls.length > 0)
   expect(old).not.toHaveBeenCalled()
   expect(latest).toHaveBeenCalledTimes(1)
-  const count = tokens.mock.calls.length
   highlightDocument(options(source, { to: 800, subscriberId: "hidden" }))
+  const count = tokens.mock.calls.length
   cancelHighlightRequest("hidden")
   await nextTurn()
   expect(tokens).toHaveBeenCalledTimes(count)
@@ -215,9 +215,10 @@ test("version, language, theme, release, eviction, disable and shutdown cancel s
   expect(old).not.toHaveBeenCalled()
   tokens.mockClear()
   highlightDocument(options(source, { invalidate: old }))
+  const beforeRelease = tokens.mock.calls.length
   releaseHighlightDocument("call:script")
   await nextTurn()
-  expect(tokens).not.toHaveBeenCalled()
+  expect(tokens).toHaveBeenCalledTimes(beforeRelease)
   for (let i = 0; i < 30; i++)
     highlightDocument(options(source, { id: String(i), subscriberId: String(i), invalidate: old }))
   expect(documentCacheStats().entries).toBe(24)
@@ -242,6 +243,107 @@ test("invalid ranges and oversized documents fail explicitly, unsupported langua
   expect(highlightDocument(options("x".repeat(4_000_001)))).toBeNull()
   expect(onError).toHaveBeenCalledTimes(2)
   expect(highlightDocument(options("x", { language: "not-a-language" }))).toBeNull()
+})
+
+test("small streaming updates immediately highlight the tail without reprocessing stable lines or redrawing", async () => {
+  await shortReady()
+  const redraw = mock(() => {})
+  let source = 'const first = 1\nconst message = "hel'
+  let previous = highlightDocument(options(source, { streaming: true, invalidate: redraw }))!
+  expect(previous.every((line) => line !== null)).toBe(true)
+  for (const suffix of [
+    "l",
+    "o",
+    '"',
+    "\n/*",
+    "\ncomment",
+    "\n*/\nconst s = `hel",
+    "lo",
+    "\nworld",
+    "`",
+    "\n",
+  ]) {
+    const stable = source.split("\n").length - 1
+    const oldTail = source.split("\n").at(-1)!
+    source += suffix
+    tokens.mockClear()
+    const current = highlightDocument(options(source, { streaming: true, invalidate: redraw }))!
+    expect(current.every((line) => line !== null)).toBe(true)
+    expect(current.slice(0, stable)).toEqual(previous.slice(0, stable))
+    expect(tokens.mock.calls.map(([code]) => code).join("\n")).toBe(oldTail + suffix)
+    const count = tokens.mock.calls.length
+    expect(highlightDocument(options(source, { streaming: true, invalidate: redraw }))).toEqual(
+      current,
+    )
+    expect(tokens).toHaveBeenCalledTimes(count)
+    const expected = instance.codeToTokens(source, { lang: "typescript", theme: "dark-plus" })
+    expect(current).toEqual(ansiLines(expected.tokens, theme, expected.fg))
+    previous = current
+  }
+  const count = tokens.mock.calls.length
+  await nextTurn()
+  expect(tokens).toHaveBeenCalledTimes(count)
+  expect(redraw).not.toHaveBeenCalled()
+  expect(documentCacheStats().tasks).toBe(0)
+  expect(documentCacheStats().subscribers).toBe(0)
+})
+
+test.each([
+  [
+    "lines",
+    Array.from({ length: 240 }, (_, i) => `const n${i} = ${i}`),
+    HIGHLIGHT_LIMITS.syncLines,
+  ],
+  ["characters", Array.from({ length: 4 }, (_, i) => "//" + String(i).repeat(9000)), 1],
+] as const)(
+  "synchronously fills the %s budget and schedules only the remaining lines",
+  async (_name, lines, completed) => {
+    await shortReady()
+    const source = lines.join("\n")
+    const redraw = mock(() => {})
+    const initial = highlightDocument(options(source, { invalidate: redraw }))!
+    expect(initial.slice(0, completed).every((line) => line !== null)).toBe(true)
+    expect(initial.slice(completed).every((line) => line === null)).toBe(true)
+    const syncCalls = tokens.mock.calls.length
+    expect(documentCacheStats().tasks).toBe(1)
+    await until(() => redraw.mock.calls.length > 0)
+    expect(
+      tokens.mock.calls
+        .slice(syncCalls)
+        .map(([code]) => code)
+        .join("\n"),
+    ).toBe(lines.slice(completed).join("\n"))
+    const result = highlightDocument(options(source))
+    const expected = instance.codeToTokens(source, { lang: "typescript", theme: "dark-plus" })
+    expect(result).toEqual(ansiLines(expected.tokens, theme, expected.fg))
+    expect(redraw).toHaveBeenCalledTimes(1)
+    expect(documentCacheStats().tasks).toBe(0)
+  },
+)
+
+test("a synchronous streamed tail cancels pending older slices without a stale commit or redraw", async () => {
+  await shortReady()
+  let source = ["/*", ...Array(190).fill("comment"), "partial"].join("\n")
+  const oldRedraw = mock(() => {})
+  const initial = highlightDocument(options(source, { streaming: true, invalidate: oldRedraw }))!
+  expect(initial.at(-1)).toBeNull()
+  await nextTurn()
+  expect(documentCacheStats().tasks).toBe(1)
+  tokens.mockClear()
+  source += " tail\n*/\nconst final = 1"
+  const redraw = mock(() => {})
+  const result = highlightDocument(options(source, { streaming: true, invalidate: redraw }))!
+  expect(result.every((line) => line !== null)).toBe(true)
+  expect(tokens.mock.calls.map(([code]) => code)).toEqual(["partial tail\n*/", "const final = 1"])
+  const count = tokens.mock.calls.length
+  await nextTurn()
+  await nextTurn()
+  expect(tokens).toHaveBeenCalledTimes(count)
+  expect(oldRedraw).not.toHaveBeenCalled()
+  expect(redraw).not.toHaveBeenCalled()
+  expect(documentCacheStats().tasks).toBe(0)
+  const expected = instance.codeToTokens(source, { lang: "typescript", theme: "dark-plus" })
+  expect(result).toEqual(ansiLines(expected.tokens, theme, expected.fg))
 })
 
 test("streaming reprocesses only the unstable tail and appended lines across comments and strings", async () => {
@@ -270,7 +372,7 @@ test("rapid streaming updates are latest-wins and non-append modifications resta
   let source = "/*\n" + "comment\n".repeat(220)
   highlightDocument(options(source, { streaming: true, invalidate: old }))
   await nextTurn()
-  expect(tokens).toHaveBeenCalledTimes(1)
+  expect(tokens).toHaveBeenCalledTimes(2)
   const prefix = tokens.mock.calls[0]![0]
   source += "end"
   highlightDocument(options(source, { streaming: true, invalidate: old }))
@@ -533,9 +635,10 @@ test("in-place Pi theme changes cancel queued slices and redraws before another 
   const source = "const n = 1\n".repeat(1000)
   const old = mock(() => {})
   highlightDocument(options(source, { invalidate: old }))
+  const beforeThemeChange = tokens.mock.calls.length
   Object.defineProperty(theme, "appearance", { configurable: true, value: "light" })
   await nextTurn()
-  expect(tokens).not.toHaveBeenCalled()
+  expect(tokens).toHaveBeenCalledTimes(beforeThemeChange)
   expect(documentCacheStats().subscribers).toBe(0)
   expect(documentCacheStats().tasks).toBe(0)
   expect(old).not.toHaveBeenCalled()
